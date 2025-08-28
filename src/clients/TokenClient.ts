@@ -379,9 +379,8 @@ export class TokenClient {
 
   private _getAllowanceCacheKey(spokePoolClient: SpokePoolClient, originToken: string): string {
     const { chainId } = spokePoolClient;
-    return `l2TokenAllowance_${chainId}_${originToken}_${
-      this.relayerEvmAddress
-    }_targetContract:${spokePoolClient.spokePoolAddress.toEvmAddress()}`;
+    return `l2TokenAllowance_${chainId}_${originToken}_${this.relayerEvmAddress
+      }_targetContract:${spokePoolClient.spokePoolAddress.toEvmAddress()}`;
   }
 
   private async _getAllowance(spokePoolClient: SpokePoolClient, token: Contract): Promise<BigNumber> {
@@ -438,7 +437,8 @@ export class TokenClient {
 
   private _getTokenClientTokens(): L1Token[] {
     // The token client's tokens should be the hub pool tokens plus any extra configured tokens in the inventory config.
-    const hubPoolTokens = this.hubPoolClient.getL1Tokens();
+    // const hubPoolTokens = this.hubPoolClient.getL1Tokens();
+    // this.logger.debug({ at: "TokenClient", message: `L1Tokens ${hubPoolTokens.toLocaleString()}` });
     const additionalL1Tokens = this.additionalL1Tokens.map((l1Token) => {
       const l1TokenInfo = getTokenInfo(l1Token, this.hubPoolClient.chainId);
       assert(l1TokenInfo.address.isEVM());
@@ -447,7 +447,7 @@ export class TokenClient {
         address: l1TokenInfo.address,
       };
     });
-    return dedupArray([...hubPoolTokens, ...additionalL1Tokens]);
+    return dedupArray([...additionalL1Tokens]);
   }
 
   private async _getSolanaTokenBalance(

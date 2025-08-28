@@ -785,7 +785,7 @@ export class ProfitClient {
 
   private _getL1Tokens(): L1Token[] {
     // The L1 tokens should be the hub pool tokens plus any extra configured tokens in the inventory config.
-    const hubPoolTokens = this.hubPoolClient.getL1Tokens();
+    // const hubPoolTokens = this.hubPoolClient.getL1Tokens();
     const additionalL1Tokens = this.additionalL1Tokens.map((l1Token) => {
       const l1TokenInfo = getTokenInfo(l1Token, this.hubPoolClient.chainId);
       assert(l1TokenInfo.address.isEVM());
@@ -794,7 +794,7 @@ export class ProfitClient {
         address: l1TokenInfo.address,
       };
     });
-    return dedupArray([...hubPoolTokens, ...additionalL1Tokens]);
+    return dedupArray([...additionalL1Tokens]);
   }
 
   private _getNativeTokenNetwork(symbol: string): number {

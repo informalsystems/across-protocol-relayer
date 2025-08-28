@@ -149,11 +149,12 @@ export class Relayer {
     }
 
     await updateSpokePoolClients(spokePoolClients, [
+      // TODO: confirm that's ok to disable these events
       "FundsDeposited",
-      "RequestedSpeedUpDeposit",
-      "FilledRelay",
-      "RelayedRootBundle",
-      "ExecutedRelayerRefundRoot",
+      // "RequestedSpeedUpDeposit",
+      // "FilledRelay",
+      // "RelayedRootBundle",
+      // "ExecutedRelayerRefundRoot",
     ]);
 
     await Promise.all([
