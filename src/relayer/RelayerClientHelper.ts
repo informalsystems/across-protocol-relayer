@@ -113,7 +113,11 @@ export async function constructRelayerClients(
   // The relayer only uses the HubPoolClient to query repayments refunds for the latest validated
   // bundle and the pending bundle. 8 hours should cover the latest two bundles on production in
   // almost all cases. Look back to genesis on testnets.
-  const hubPoolLookBack = sdkUtils.chainIsProd(config.hubPoolChainId) ? 3600 * 8 : Number.POSITIVE_INFINITY;
+
+  // Init HubPoolLookBack to 1h30 in the past instead of 8h per default to restart relayer faster 
+  const hubPoolLookBack = sdkUtils.chainIsProd(config.hubPoolChainId) ? 5400 * 1 : Number.POSITIVE_INFINITY;
+  // const hubPoolLookBack = sdkUtils.chainIsProd(config.hubPoolChainId) ? 3600 * 8 : Number.POSITIVE_INFINITY;
+
   const commonClients = await constructClients(logger, config, baseSigner, hubPoolLookBack);
   const { configStoreClient, hubPoolClient, multiCallerClient } = commonClients;
   await updateClients(commonClients, config, logger);

@@ -19,6 +19,7 @@ import {
   CHAIN_IDs,
   EvmGasPriceEstimate,
   SVMProvider,
+  getNetworkName,
 } from "../utils";
 import {
   CompilableTransactionMessage,
@@ -32,7 +33,11 @@ import {
 dotenv.config();
 
 // Define chains that require legacy (type 0) transactions
-export const LEGACY_TRANSACTION_CHAINS = [CHAIN_IDs.BSC];
+// Can be configured via LEGACY_TRANSACTION_CHAINS environment variable (comma-separated chain IDs)
+// Default includes Base (8453) and Ethereum (1) mainnet chains
+const DEFAULT_LEGACY_CHAINS = [CHAIN_IDs.MAINNET, CHAIN_IDs.BASE, CHAIN_IDs.BSC]; // Ethereum mainnet and Base
+const ENV_LEGACY_CHAINS = process.env.LEGACY_TRANSACTION_CHAINS?.split(',').map(Number).filter(Boolean) || [];
+export const LEGACY_TRANSACTION_CHAINS = [...DEFAULT_LEGACY_CHAINS, ...ENV_LEGACY_CHAINS];
 
 export type TransactionSimulationResult = {
   transaction: AugmentedTransaction;
@@ -97,7 +102,10 @@ export async function runTransaction(
   value = bnZero,
   gasLimit: BigNumber | null = null,
   nonce: number | null = null,
-  retriesRemaining = 1
+  retriesRemaining = 1,
+  depositId?: BigNumber,
+  maxGasUsd?: BigNumber,
+  gasTokenPriceUsd?: BigNumber
 ): Promise<TransactionResponse> {
   const { provider } = contract;
   const { chainId } = await provider.getNetwork();
@@ -117,18 +125,26 @@ export async function runTransaction(
       Number(process.env[`MAX_FEE_PER_GAS_SCALER_${chainId}`] || process.env.MAX_FEE_PER_GAS_SCALER) ||
       DEFAULT_GAS_FEE_SCALERS[chainId]?.maxFeePerGasScaler;
 
+
     let gas = await getGasPrice(
       provider,
       priorityFeeScaler,
       maxFeePerGasScaler,
       sendRawTransaction
         ? undefined
-        : await contract.populateTransaction[method](...(args as Array<unknown>), { value })
+        : await contract.populateTransaction[method](...(args as Array<unknown>), { value }),
+      logger,
+      method,
+      depositId,
+      maxGasUsd, // pre-calculated leftover USD for gas
+      gasTokenPriceUsd,
+      gasLimit
     );
 
     // Check if the chain requires legacy transactions
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
-      gas = { gasPrice: gas.maxFeePerGas };
+      // For legacy chains, explicitly set type to 0 and ensure only gasPrice is present
+      gas = { gasPrice: gas.gasPrice || gas.maxFeePerGas };
     }
 
     logger.debug({
@@ -141,17 +157,30 @@ export async function runTransaction(
       nonce,
       gas,
       gasLimit,
+      priorityFeeScaler,
+      maxFeePerGasScaler,
+      legacyTx: LEGACY_TRANSACTION_CHAINS.includes(chainId),
       sendRawTxn: sendRawTransaction,
     });
     // TX config has gas (from gasPrice function), value (how much eth to send) and an optional gasLimit. The reduce
     // operation below deletes any null/undefined elements from this object. If gasLimit or nonce are not specified,
     // ethers will determine the correct values to use.
-    const txConfig = Object.entries({ ...gas, value, nonce, gasLimit }).reduce(
+    let txConfig: any = Object.entries({ ...gas, value, nonce, gasLimit }).reduce(
       (a, [k, v]) => (v ? ((a[k] = v), a) : a),
       {}
     );
+
+    // For legacy chains, explicitly set transaction type to 0
+    if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
+      txConfig.type = 0; // Legacy transaction type
+    }
     if (sendRawTransaction) {
-      return await (await contract.signer).sendTransaction({ to: contract.address, value, ...gas });
+      // For legacy chains, ensure we're sending a legacy transaction
+      const rawTxConfig = LEGACY_TRANSACTION_CHAINS.includes(chainId)
+        ? { to: contract.address, value, ...gas, type: 0 }
+        : { to: contract.address, value, ...gas };
+
+      return await (await contract.signer).sendTransaction(rawTxConfig);
     } else {
       return await contract[method](...(args as Array<unknown>), txConfig);
     }
@@ -166,7 +195,7 @@ export async function runTransaction(
         retriesRemaining,
       });
 
-      return await runTransaction(logger, contract, method, args, value, gasLimit, null, retriesRemaining);
+      return await runTransaction(logger, contract, method, args, value, gasLimit, null, retriesRemaining, maxGasUsd, gasTokenPriceUsd);
     } else {
       // Empirically we have observed that Ethers can produce nested errors, so we try to recurse down them
       // and log them as clearly as possible. For example:
@@ -222,13 +251,23 @@ export async function getGasPrice(
   provider: ethers.providers.Provider,
   priorityScaler = 1.2,
   maxFeePerGasScaler = 3,
-  transactionObject?: ethers.PopulatedTransaction
+  transactionObject?: ethers.PopulatedTransaction,
+  logger?: winston.Logger,
+  method?: string,
+  depositId?: BigNumber,
+  maxGasUsd?: BigNumber,
+  gasTokenPriceUsd?: BigNumber,
+  gasLimit?: BigNumber
 ): Promise<Partial<FeeData>> {
   // Floor scalers at 1.0 as we'll rarely want to submit too low of a gas price. We mostly
   // just want to submit with as close to prevailing fees as possible.
   maxFeePerGasScaler = Math.max(1, maxFeePerGasScaler);
   priorityScaler = Math.max(1, priorityScaler);
   const { chainId } = await provider.getNetwork();
+
+  // Check if this chain uses legacy transactions
+  const isLegacyChain = LEGACY_TRANSACTION_CHAINS.includes(chainId);
+
   // Pass in unsignedTx here for better Linea gas price estimations via the Linea Viem provider.
   const feeData = (await gasPriceOracle.getGasPriceEstimate(provider, {
     chainId,
@@ -236,6 +275,94 @@ export async function getGasPrice(
     priorityFeeMultiplier: toBNWei(priorityScaler),
     unsignedTx: transactionObject,
   })) as EvmGasPriceEstimate;
+
+
+  // Log the original oracle gas prices
+  logger.debug({
+    at: "GasPrice",
+    message: "Oracle suggested gas prices",
+    chainId: chainId,
+    method: method,
+    depositId: depositId,
+    baseFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas.sub(feeData.maxPriorityFeePerGas), "gwei"),
+    maxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
+    maxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
+    gasLimit: ethers.utils.formatUnits(gasLimit, "wei"),
+    maxFeeScaler: maxFeePerGasScaler,
+    priorityScaler: priorityScaler,
+  });
+
+
+  // Implement the new enhanced gas pricing approach:
+  // 1. maxGasUsd is the entire amount available for gas
+  // 2. Divide by gas limit to get per-gas enhancement
+  // 3. Use it as the effective max fee per gas unit
+  // 4. For legacy chains: use simplified calculation without gas fee estimate, for EIP-1559: derive priority fee from gas estimation
+
+  if ((logger) && (maxGasUsd) && (gasTokenPriceUsd) && maxGasUsd.gt(bnZero)) {
+    // Gas price is per unit of gas, so divide maxGasUsd by gas limit first
+    const gasLimitForCalculation = gasLimit || toBNWei(21000); // Default to 21k gas if not specified
+    const maxGasUsdPerGas = maxGasUsd.div(gasLimitForCalculation);
+
+    // Convert USD per gas to wei per gas to get the effective max fee per gas unit
+    const enhancedGasPrice = maxGasUsdPerGas.mul(toBNWei(1)).div(gasTokenPriceUsd);
+
+    if (isLegacyChain) {
+      logger.debug({
+        at: "TxUtil#getGasPrice",
+        message: "Enhanced gas price using legacy Tx",
+        chainId: chainId,
+        method: method,
+        depositId: depositId,
+        estimatedGasPrice: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
+        enhancedGasPrice: ethers.utils.formatUnits(enhancedGasPrice, "gwei"),
+        gasLimit: ethers.utils.formatUnits(gasLimitForCalculation, "wei"),
+        maxGasUsd: ethers.utils.formatEther(maxGasUsd),
+        maxGasUsdPerGas: ethers.utils.formatEther(maxGasUsdPerGas),
+        gasTokenPriceUsd: ethers.utils.formatEther(gasTokenPriceUsd),
+      });
+
+      return {
+        gasPrice: enhancedGasPrice, // Single gasPrice field for legacy transactions
+      };
+    } else {
+      // EIP-1559 calculation: derive priority fee from gas estimation
+      const estimatedBaseFee = feeData.maxFeePerGas.sub(feeData.maxPriorityFeePerGas);
+
+      // Calculate the final priority fee: effectiveMaxFee - estimatedBaseFee
+      const finalMaxPriorityFee = enhancedGasPrice.sub(estimatedBaseFee);
+
+      // Ensure priority fee is not negative
+      const enhancedMaxPriorityFee = finalMaxPriorityFee.gt(bnZero) ? finalMaxPriorityFee : feeData.maxPriorityFeePerGas;
+
+      logger.debug({
+        at: "TxUtil#getGasPrice",
+        message: "Enhanced gas prices using EIP-1559",
+        chainId: chainId,
+        method: method,
+        depositId: depositId,
+        originalMaxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
+        enhancedMaxFeePerGas: ethers.utils.formatUnits(enhancedGasPrice, "gwei"),
+        originalMaxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
+        enhancedMaxPriorityFeePerGas: ethers.utils.formatUnits(enhancedMaxPriorityFee, "gwei"),
+        maxGasUsd: ethers.utils.formatEther(maxGasUsd),
+        gasLimit: ethers.utils.formatUnits(gasLimitForCalculation, "wei"),
+        maxGasUsdPerGas: ethers.utils.formatEther(maxGasUsdPerGas),
+        estimatedBaseFee: ethers.utils.formatUnits(estimatedBaseFee, "gwei"),
+        gasTokenPriceUsd: ethers.utils.formatEther(gasTokenPriceUsd),
+      });
+
+      return {
+        maxFeePerGas: enhancedGasPrice,
+        maxPriorityFeePerGas: enhancedMaxPriorityFee,
+      };
+    }
+  } else {
+    logger.debug({
+      at: "GasPrice",
+      message: "No leftover USD for gas enhancement, using oracle prices"
+    });
+  }
 
   // Default to EIP-1559 (type 2) pricing. If gasPriceOracle is using a legacy adapter for this chain then
   // the priority fee will be 0.
@@ -251,6 +378,7 @@ export async function willSucceed(transaction: AugmentedTransaction): Promise<Tr
     return { transaction, succeed: true };
   }
 
+  const timeNow = Date.now();
   const { contract, method } = transaction;
   const args = transaction.value ? [...transaction.args, { value: transaction.value }] : transaction.args;
 
@@ -282,13 +410,13 @@ export async function willSucceed(transaction: AugmentedTransaction): Promise<Tr
 
 export function getTarget(targetAddress: string):
   | {
-      chainId: number;
-      contractName: string;
-      targetAddress: string;
-    }
+    chainId: number;
+    contractName: string;
+    targetAddress: string;
+  }
   | {
-      targetAddress: string;
-    } {
+    targetAddress: string;
+  } {
   try {
     return { targetAddress, ...getContractInfoFromAddress(targetAddress) };
   } catch (error) {
