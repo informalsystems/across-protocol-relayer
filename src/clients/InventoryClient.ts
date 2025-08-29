@@ -3,6 +3,7 @@ import WETH_ABI from "../common/abi/Weth.json";
 import {
   bnZero,
   BigNumber,
+  CHAIN_IDs,
   winston,
   toBN,
   getNetworkName,
@@ -300,6 +301,7 @@ export class InventoryClient {
   }
 
   async getAllBundleRefunds(): Promise<CombinedRefunds[]> {
+    const mark = this.profiler.start("bundleRefunds");
     const refunds: CombinedRefunds[] = [];
     const [pendingRefunds, nextBundleRefunds] = await Promise.all([
       this.bundleDataClient.getPendingRefundsFromValidBundles(),
@@ -329,7 +331,18 @@ export class InventoryClient {
         refunds: nextBundleRefunds[0],
       });
     }
+
+    mark.stop({
+      message: "Time to calculate total refunds per chain",
+    });
     return refunds;
+  }
+
+  async executeBundleRefundsPromise(): Promise<CombinedRefunds[]> {
+    if (!isDefined(this.bundleRefundsPromise)) {
+      this.bundleRefundsPromise = this.getAllBundleRefunds();
+    }
+    return this.bundleRefundsPromise;
   }
 
   // Return the upcoming refunds (in pending and next bundles) on each chain.
@@ -338,16 +351,10 @@ export class InventoryClient {
     let refundsToConsider: CombinedRefunds[] = [];
     const { decimals: l1TokenDecimals } = getTokenInfo(l1Token, this.hubPoolClient.chainId);
 
-    let mark: ReturnType<typeof this.profiler.start>;
     // Increase virtual balance by pending relayer refunds from the latest valid bundle and the
     // upcoming bundle. We can assume that all refunds from the second latest valid bundle have already
     // been executed.
-    if (!isDefined(this.bundleRefundsPromise)) {
-      // @dev Save this as a promise so that other parallel calls to this function don't make the same call.
-      mark = this.profiler.start(`bundleRefunds for ${l1Token}`);
-      this.bundleRefundsPromise = this.getAllBundleRefunds();
-    }
-    refundsToConsider = lodash.cloneDeep(await this.bundleRefundsPromise);
+    refundsToConsider = lodash.cloneDeep(await this.executeBundleRefundsPromise());
     const totalRefundsPerChain = this.getEnabledChains().reduce(
       (refunds: { [chainId: string]: BigNumber }, chainId) => {
         const destinationToken = this.getRemoteTokenForL1Token(l1Token, chainId);
@@ -365,11 +372,6 @@ export class InventoryClient {
       },
       {}
     );
-
-    mark?.stop({
-      message: "Time to calculate total refunds per chain",
-      l1Token,
-    });
 
     return totalRefundsPerChain;
   }
@@ -1607,16 +1609,27 @@ export class InventoryClient {
   /**
    * @notice Return possible repayment chains for L1 token that have "slow withdrawals" from L2 to L1, so
    * taking repayment on these chains would be done to reduce HubPool utilization and keep funds out of the
-   * slow withdrawal canonical bridges.
+   * slow withdrawal canonical bridges. Explicitly skip chains with fast rebalancing options because it doesn't
+   * help with utilisation issues.
    * @param l1Token
    * @returns list of chains for l1Token that have a token config enabled and have pool rebalance routes set.
    */
   getSlowWithdrawalRepaymentChains(l1Token: EvmAddress): number[] {
-    return SLOW_WITHDRAWAL_CHAINS.filter(
-      (chainId) =>
-        this._l1TokenEnabledForChain(l1Token, Number(chainId)) &&
-        this.hubPoolClient.l2TokenEnabledForL1Token(l1Token, Number(chainId))
-    );
+    const { hubPoolClient } = this;
+    const { USDC, USDT } = TOKEN_SYMBOLS_MAP;
+    const l1TokenStr = l1Token.toNative();
+    const isUSDC = USDC.addresses[hubPoolClient.chainId] === l1TokenStr;
+    const isUSDT = !isUSDC && USDT.addresses[hubPoolClient.chainId] === l1TokenStr;
+
+    return SLOW_WITHDRAWAL_CHAINS.filter((repaymentChainId) => {
+      let fastWithdrawal = isUSDC && sdkUtils.chainIsCCTPEnabled(repaymentChainId);
+      fastWithdrawal ||= isUSDT && repaymentChainId === CHAIN_IDs.ARBITRUM;
+      return (
+        !fastWithdrawal &&
+        this._l1TokenEnabledForChain(l1Token, repaymentChainId) &&
+        this.hubPoolClient.l2TokenEnabledForL1Token(l1Token, repaymentChainId)
+      );
+    });
   }
 
   log(message: string, data?: AnyObject, level: DefaultLogLevels = "debug"): void {

@@ -1,5 +1,4 @@
 import * as utils from "@across-protocol/contracts/dist/test-utils";
-import { TokenRolesEnum } from "@uma/common";
 import { SpyTransport, bigNumberFormatter } from "@uma/logger";
 import { AcrossConfigStore, FakeContract } from "@across-protocol/contracts";
 import { constants, utils as sdkUtils } from "@across-protocol/sdk";
@@ -40,6 +39,9 @@ import {
 } from "../constants";
 import { SpokePoolDeploymentResult, SpyLoggerResult } from "../types";
 import { INFINITE_FILL_DEADLINE } from "../../src/common";
+
+// Replicated from @uma/common
+const TokenRolesEnum = { OWNER: "0", MINTER: "1", BURNER: "3" };
 
 export {
   SpyTransport,
@@ -525,7 +527,7 @@ export function fillFromArgs(fillArgs: { [key: string]: any }): Fill {
   };
 }
 
-// decomposes Fill into primitive types suitable for === comparions
+// decomposes Fill into primitive types suitable for === comparisons
 export function fillIntoPrimitiveTypes(fill: Fill) {
   return {
     ...fill,
@@ -592,7 +594,7 @@ export function depositFromArgs(depositArgs: { [key: string]: any }): Deposit {
   return deposit;
 }
 
-// decomposes Deposit into primitive types suitable for === comparions
+// decomposes Deposit into primitive types suitable for === comparisons
 export function depositIntoPrimitiveTypes(deposit: Deposit) {
   return {
     ...deposit,

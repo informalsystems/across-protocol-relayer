@@ -10,7 +10,6 @@ import {
   Signer,
   disconnectRedisClients,
   isDefined,
-  Profiler,
   getSvmSignerFromEvmSigner,
   getRedisCache,
   waitForPubSub,
@@ -81,14 +80,36 @@ function resolvePersonality(config: DataworkerConfig): string {
   return "Dataworker"; // unknown
 }
 
-async function getChallengeRemaining(chainId: number): Promise<number> {
+async function getChallengeRemaining(
+  chainId: number,
+  challengeBuffer: number,
+  logger: winston.Logger
+): Promise<number> {
   const provider = await getProvider(chainId);
+  const latestBlock = await provider.getBlockNumber();
   const hubPool = getDeployedContract("HubPool", chainId).connect(provider);
 
-  const [proposal, currentTime] = await Promise.all([hubPool.rootBundleProposal(), hubPool.getCurrentTime()]);
+  const [proposal, currentTime] = await Promise.all([
+    hubPool.rootBundleProposal({
+      blockTag: latestBlock,
+    }),
+    hubPool.getCurrentTime({
+      blockTag: latestBlock,
+    }),
+  ]);
   const { challengePeriodEndTimestamp } = proposal;
+  const challengeRemaining = Math.max(challengePeriodEndTimestamp + challengeBuffer - currentTime, 0);
+  logger.debug({
+    at: "Dataworker#index::getChallengeRemaining",
+    message: "Challenge remaining",
+    challengeRemaining,
+    challengeBuffer,
+    challengePeriodEndTimestamp,
+    currentTime,
+    blockTag: latestBlock,
+  });
 
-  return Math.max(challengePeriodEndTimestamp - currentTime, 0);
+  return challengeRemaining;
 }
 
 async function canProposeRootBundle(chainId: number): Promise<boolean> {
@@ -101,15 +122,11 @@ async function canProposeRootBundle(chainId: number): Promise<boolean> {
 }
 
 export async function runDataworker(_logger: winston.Logger, baseSigner: Signer): Promise<void> {
-  const profiler = new Profiler({
-    at: "Dataworker#index",
-    logger: _logger,
-  });
   logger = _logger;
 
   const config = new DataworkerConfig(process.env);
   const personality = resolvePersonality(config);
-  const challengeRemaining = await getChallengeRemaining(config.hubPoolChainId);
+  const challengeRemaining = await getChallengeRemaining(config.hubPoolChainId, 0, logger);
 
   // @dev The check for `runIdentifier` doubles as a check whether this instance is being run in GCP (or mocked as a production instance) and as a unique identifier
   // which can be cached in redis (that is, for any executor/proposer instance, the run identifier lets any other instance know of its existence via a redis mapping
@@ -127,14 +144,7 @@ export async function runDataworker(_logger: winston.Logger, baseSigner: Signer)
     return;
   }
 
-  const { clients, dataworker } = await profiler.measureAsync(
-    createDataworker(logger, baseSigner, config),
-    "createDataworker",
-    {
-      message: "Time to update non-spoke clients",
-    }
-  );
-
+  const { clients, dataworker } = await createDataworker(logger, baseSigner, config);
   await config.update(logger); // Update address filter.
   const l1BlockTime = (await averageBlockTime(clients.hubPoolClient.hubPool.provider)).average;
   const adjustedL1BlockTime = l1BlockTime + Number(process.env["L1_BLOCK_TIME_BUFFER"] ?? l1BlockTime); // Default adjustment is double l1BlockTime.
@@ -147,7 +157,6 @@ export async function runDataworker(_logger: winston.Logger, baseSigner: Signer)
     const { addressFilter: _addressFilter, ...loggedConfig } = config;
     logger[startupLogLevel(config)]({ at: "Dataworker#index", message: `${personality} started 👩‍🔬`, loggedConfig });
 
-    profiler.mark("loopStart");
     // Determine the spoke client's lookback:
     // 1. We initiate the spoke client event search windows based on a start bundle's bundle block end numbers and
     //    how many bundles we want to look back from the start bundle blocks.
@@ -189,7 +198,6 @@ export async function runDataworker(_logger: winston.Logger, baseSigner: Signer)
       fromBlocks,
       toBlocks
     );
-    profiler.mark("dataworkerFunctionLoopTimerStart");
     // Validate and dispute pending proposal before proposing a new one
     if (config.disputerEnabled) {
       await dataworker.validatePendingRootBundle(spokePoolClients, fromBlocks);
@@ -280,7 +288,8 @@ export async function runDataworker(_logger: winston.Logger, baseSigner: Signer)
       //   exited early for a valid reason (such as insufficient lookback), so there would be no reason to await submitting a transaction.
       const hasTransactionQueued = clients.multiCallerClient.transactionCount() !== 0;
       if ((config.l1ExecutorEnabled || config.proposerEnabled) && redis && runIdentifier && hasTransactionQueued) {
-        let updatedChallengeRemaining = await getChallengeRemaining(config.hubPoolChainId);
+        const challengeBuffer = Number(process.env.L1_EXECUTOR_CHALLENGE_BUFFER ?? 24); // Default to 24 seconds or 2 blocks.
+        let updatedChallengeRemaining = await getChallengeRemaining(config.hubPoolChainId, challengeBuffer, logger);
         // If the updated challenge remaining is greater than the challenge remaining we observed at the start, then this indicates that during the runtime of this bot,
         // an executor instance executed the pending root bundle out of the hub _and_ a proposer instance proposed a new root bundle.
         if (updatedChallengeRemaining > challengeRemaining) {
@@ -326,7 +335,7 @@ export async function runDataworker(_logger: winston.Logger, baseSigner: Signer)
             });
           }
 
-          updatedChallengeRemaining = await getChallengeRemaining(config.hubPoolChainId);
+          updatedChallengeRemaining = await getChallengeRemaining(config.hubPoolChainId, challengeBuffer, logger);
         }
         if (config.proposerEnabled) {
           // Clear the counter
@@ -362,23 +371,6 @@ export async function runDataworker(_logger: winston.Logger, baseSigner: Signer)
 
       await clients.multiCallerClient.executeTxnQueues();
     }
-    profiler.mark("dataworkerFunctionLoopTimerEnd");
-    profiler.measure("timeToLoadSpokes", {
-      message: "Time to load spokes in data worker",
-      from: "loopStart",
-      to: "dataworkerFunctionLoopTimerStart",
-    });
-    profiler.measure("timeToRunDataworkerFunctions", {
-      message: "Time to run data worker functions in data worker",
-      from: "dataworkerFunctionLoopTimerStart",
-      to: "dataworkerFunctionLoopTimerEnd",
-    });
-    // do we need to add an additional log for the sum of the previous?
-    profiler.measure("dataWorkerTotal", {
-      message: "Total time taken for dataworker",
-      from: "loopStart",
-      to: "dataworkerFunctionLoopTimerEnd",
-    });
   } finally {
     await disconnectRedisClients(logger);
   }

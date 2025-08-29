@@ -83,7 +83,7 @@ async function scrapeEvents(
 ): Promise<void> {
   const provider = eventsClient.getRpc();
   const [{ timestamp: currentTime }, ...events] = await Promise.all([
-    arch.svm.getNearestSlotTime(provider),
+    arch.svm.getNearestSlotTime(provider, { commitment: "confirmed" }, logger),
     ...eventNames.map((eventName) => _scrapeEvents(chain, eventsClient, eventName, { ...opts, to: opts.to }, logger)),
   ]);
 
@@ -171,9 +171,13 @@ async function run(argv: string[]): Promise<void> {
 
   chain = getNetworkName(chainId);
 
-  const provider = await getSvmProvider();
+  const provider = getSvmProvider(await getRedisCache());
   const blockFinder = undefined;
-  const { slot: latestSlot } = await arch.svm.getNearestSlotTime(provider);
+  const { slot: latestSlot, timestamp: now } = await arch.svm.getNearestSlotTime(
+    provider,
+    { commitment: "confirmed" },
+    logger
+  );
 
   const deploymentBlock = getDeploymentBlockNumber("SvmSpoke", chainId);
   let startSlot = latestSlot;
@@ -184,12 +188,11 @@ async function run(argv: string[]): Promise<void> {
     // Resolve `lookback` seconds from head to a specific block.
     assert(Number.isInteger(Number(lookback)), `Invalid lookback (${lookback})`);
 
-    const now = await provider.getBlockTime(latestSlot).send();
     assert(typeof now === "bigint"); // Should be unnecessary; tsc still complains.
     startSlot = BigInt(
       Math.max(
         deploymentBlock,
-        await getBlockForTimestamp(chainId, Number(now - BigInt(lookback)), blockFinder, await getRedisCache())
+        await getBlockForTimestamp(logger, chainId, Number(now - BigInt(lookback)), blockFinder, await getRedisCache())
       )
     );
   } else {
@@ -214,7 +217,7 @@ async function run(argv: string[]): Promise<void> {
     abortController.abort();
   });
 
-  const eventsClient = await arch.svm.SvmCpiEventsClient.create(await getSvmProvider());
+  const eventsClient = await arch.svm.SvmCpiEventsClient.create(getSvmProvider());
   if (latestSlot > startSlot) {
     const events = ["FundsDeposited", "FilledRelay", "RelayedRootBundle", "ExecutedRelayerRefundRoot"];
     await scrapeEvents(eventsClient, events, { ...opts, to: latestSlot });

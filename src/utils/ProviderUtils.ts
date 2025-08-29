@@ -7,6 +7,8 @@ import { delay, getOriginFromURL, Logger, SVMProvider } from "./";
 import { getRedisCache } from "./RedisUtils";
 import { isDefined } from "./TypeGuards";
 import * as viem from "viem";
+import { ClusterUrl } from "@solana/kit";
+import { CachingMechanismInterface } from "../interfaces";
 
 export const defaultTimeout = 60 * 1000;
 export class RetryProvider extends sdkProviders.RetryProvider {}
@@ -74,13 +76,34 @@ export function getProviderHeaders(provider: string, chainId: number): { [header
   return headers;
 }
 
-function getMaxConcurrency(chainId): number {
+function getMaxConcurrency(chainId: number): number {
   const { NODE_MAX_CONCURRENCY = "25" } = process.env;
-  return Number(process.env[`NODE_MAX_CONCURRENCY_${chainId}`] || NODE_MAX_CONCURRENCY);
+  return Number(process.env[`NODE_MAX_CONCURRENCY_${chainId}`] ?? NODE_MAX_CONCURRENCY);
 }
 
 function getPctRpcCallsLogged(chainId: number): number {
-  return Number(process.env[`NODE_PCT_RPC_CALLS_LOGGED_${chainId}`] || process.env.NODE_PCT_RPC_CALLS_LOGGED || "0");
+  const { NODE_PCT_RPC_CALLS_LOGGED = "0" } = process.env;
+  return Number(process.env[`NODE_PCT_RPC_CALLS_LOGGED_${chainId}`] ?? NODE_PCT_RPC_CALLS_LOGGED);
+}
+
+// This environment variable allows the operator to namespace the cache. This is useful if multiple bots are using
+// the cache and the operator intends to have them not share.
+// It's also useful as a way to synthetically "flush" the provider cache by modifying this value.
+// A recommended naming strategy is "NAME_X" where NAME is a string name and 0 is a numerical value that can be
+// adjusted for the purpose of "flushing".
+function getCacheNamespace(chainId: number): string {
+  const { NODE_PROVIDER_CACHE_NAMESPACE = "DEFAULT_0" } = process.env;
+  return process.env[`NODE_PROVIDER_CACHE_NAMESPACE_${chainId}`] ?? NODE_PROVIDER_CACHE_NAMESPACE;
+}
+
+function getRetryParams(chainId: number): { retries: number; retryDelay: number } {
+  const { NODE_RETRIES, NODE_RETRY_DELAY } = process.env;
+  return {
+    // Default to 2 retries.
+    retries: Number(process.env[`NODE_RETRIES_${chainId}`] || NODE_RETRIES || "2"),
+    // Default to a delay of 1 second between retries.
+    retryDelay: Number(process.env[`NODE_RETRY_DELAY_${chainId}`] || NODE_RETRY_DELAY || "1"),
+  };
 }
 
 /**
@@ -101,11 +124,8 @@ export async function getProvider(
     }
   }
   const {
-    NODE_RETRIES,
-    NODE_RETRY_DELAY,
     NODE_TIMEOUT,
     NODE_DISABLE_PROVIDER_CACHING,
-    NODE_PROVIDER_CACHE_NAMESPACE,
     NODE_LOG_EVERY_N_RATE_LIMIT_ERRORS,
     NODE_DISABLE_INFINITE_TTL_PROVIDER_CACHING,
     PROVIDER_CACHE_TTL,
@@ -113,11 +133,7 @@ export async function getProvider(
 
   const timeout = Number(process.env[`NODE_TIMEOUT_${chainId}`] || NODE_TIMEOUT || defaultTimeout);
 
-  // Default to 2 retries.
-  const retries = Number(process.env[`NODE_RETRIES_${chainId}`] || NODE_RETRIES || "2");
-
-  // Default to a delay of 1 second between retries.
-  const retryDelay = Number(process.env[`NODE_RETRY_DELAY_${chainId}`] || NODE_RETRY_DELAY || "1");
+  const { retries, retryDelay } = getRetryParams(chainId);
 
   const nodeQuorumThreshold = getChainQuorum(chainId);
 
@@ -150,12 +166,7 @@ export async function getProvider(
   // the user should refrain from providing a valid redis instance.
   const disableProviderCache = NODE_DISABLE_PROVIDER_CACHING === "true";
 
-  // This environment variable allows the operator to namespace the cache. This is useful if multiple bots are using
-  // the cache and the operator intends to have them not share.
-  // It's also useful as a way to synthetically "flush" the provider cache by modifying this value.
-  // A recommended naming strategy is "NAME_X" where NAME is a string name and 0 is a numerical value that can be
-  // adjusted for the purpose of "flushing".
-  const providerCacheNamespace = NODE_PROVIDER_CACHE_NAMESPACE || "DEFAULT_0";
+  const providerCacheNamespace = getCacheNamespace(chainId);
 
   const logEveryNRateLimitErrors = Number(NODE_LOG_EVERY_N_RATE_LIMIT_ERRORS || "100");
 
@@ -266,24 +277,42 @@ export function getWSProviders(chainId: number, quorum?: number): ethers.provide
 
 /**
  * @notice Returns a cached SVMProvider.
+ * @dev We are blocked from making this function async (i.e. which would be helpful so we could call getRedisCache
+ * from within the function) because the `createRpcClient` method makes a call to @solana/kit/createSolanaRpcFromTransport
+ * which has a bug as of @solana/kit@2.1.0 (patched in >= 2.2.0) that prevents any functions calling createRpcClient
+ * to be async. See https://github.com/anza-xyz/kit/commit/304a44fc68401001af45b1088eea825d8f437677 for more details.
+ * The reason we can't easily bump @solana/kit is because certain types in @solana/kit>=2.2.0 are
+ * incompatible with the types in lower versions, which we import through other packages like @coral/anchor.
+ * Read about package incompatibility issues here: https://github.com/anza-xyz/kit/releases/tag/v2.1.1
  */
-export async function getSvmProvider(
+export function getSvmProvider(
+  redisClient: CachingMechanismInterface | undefined = undefined,
   logger: winston.Logger = Logger,
   chainId = MAINNET_CHAIN_IDs.SOLANA
-): Promise<SVMProvider> {
-  const nodeUrlList = getNodeUrlList(chainId);
-  const namespace = process.env["NODE_PROVIDER_CACHE_NAMESPACE"] ?? "default_svm_provider";
+): SVMProvider {
+  const namespace = getCacheNamespace(chainId);
   const maxConcurrency = getMaxConcurrency(chainId);
-  const redisClient = await getRedisCache(logger);
   const pctRpcCallsLogged = getPctRpcCallsLogged(chainId);
-  const providerFactory = new sdkProviders.CachedSolanaRpcFactory(
-    namespace,
-    redisClient,
-    maxConcurrency,
-    pctRpcCallsLogged,
-    logger,
-    Object.values(nodeUrlList)[0],
-    chainId
+  const { retries, retryDelay } = getRetryParams(chainId);
+  const nodeQuorumThreshold = getChainQuorum(chainId);
+
+  const constructorArgumentLists = Object.values(getNodeUrlList(chainId, nodeQuorumThreshold)).map((url) => {
+    return [
+      namespace,
+      redisClient,
+      retries,
+      retryDelay,
+      maxConcurrency,
+      pctRpcCallsLogged,
+      logger,
+      url as ClusterUrl,
+      chainId,
+    ] as ConstructorParameters<typeof sdkProviders.CachedSolanaRpcFactory>;
+  });
+  const providerFactory = new sdkProviders.QuorumFallbackSolanaRpcFactory(
+    constructorArgumentLists,
+    nodeQuorumThreshold,
+    logger
   );
   return providerFactory.createRpcClient();
 }

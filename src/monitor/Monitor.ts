@@ -5,6 +5,7 @@ import {
   BundleAction,
   DepositWithBlock,
   FillStatus,
+  FillWithBlock,
   L1Token,
   RelayerBalanceReport,
   RelayerBalanceTable,
@@ -55,12 +56,22 @@ import {
   getBinanceApiClient,
   getBinanceWithdrawalLimits,
   chainIsEvm,
+  getSolanaTokenBalance,
+  getFillStatusPda,
+  getKitKeypairFromEvmSigner,
+  getRelayDataFromFill,
 } from "../utils";
 import { MonitorClients, updateMonitorClients } from "./MonitorClientHelper";
 import { MonitorConfig } from "./MonitorConfig";
 import { CombinedRefunds, getImpliedBundleBlockRanges } from "../dataworker/DataworkerUtils";
 import { PUBLIC_NETWORKS, TOKEN_EQUIVALENCE_REMAPPING } from "@across-protocol/constants";
-import { utils as sdkUtils } from "@across-protocol/sdk";
+import { utils as sdkUtils, arch } from "@across-protocol/sdk";
+import {
+  address,
+  fetchEncodedAccount,
+  getBase64EncodedWireTransaction,
+  signTransactionMessageWithSigners,
+} from "@solana/kit";
 
 // 60 minutes, which is the length of the challenge window, so if a rebalance takes longer than this to finalize,
 // then its finalizing after the subsequent challenge period has started, which is sub-optimal.
@@ -178,10 +189,6 @@ export class Monitor {
       this.hubPoolStartingBlock,
       this.hubPoolEndingBlock
     );
-    const cancelledBundles = this.clients.hubPoolClient.getCancelledRootBundlesInBlockRange(
-      this.hubPoolStartingBlock,
-      this.hubPoolEndingBlock
-    );
     const disputedBundles = this.clients.hubPoolClient.getDisputedRootBundlesInBlockRange(
       this.hubPoolStartingBlock,
       this.hubPoolEndingBlock
@@ -189,9 +196,6 @@ export class Monitor {
 
     for (const event of proposedBundles) {
       this.notifyIfUnknownCaller(event.proposer.toEvmAddress(), BundleAction.PROPOSED, event.txnRef);
-    }
-    for (const event of cancelledBundles) {
-      this.notifyIfUnknownCaller(event.disputer, BundleAction.CANCELED, event.txnRef);
     }
     for (const event of disputedBundles) {
       this.notifyIfUnknownCaller(event.disputer, BundleAction.DISPUTED, event.txnRef);
@@ -202,23 +206,24 @@ export class Monitor {
     const { hubPoolClient, spokePoolClients } = this.clients;
     const unfilledDeposits: Record<number, DepositWithBlock[]> = Object.fromEntries(
       await mapAsync(Object.values(spokePoolClients), async ({ chainId: destinationChainId }) => {
-        const deposits = getUnfilledDeposits(destinationChainId, spokePoolClients, hubPoolClient).map(
+        const deposits = getUnfilledDeposits(spokePoolClients[destinationChainId], spokePoolClients, hubPoolClient).map(
           ({ deposit, invalidFills: invalid }) => {
             // Ignore depositId >= bnUInt32Max; these tend to be pre-fills that are eventually valid and
             // tend to confuse this reporting because there are multiple deposits with the same depositId.
             if (deposit.depositId < bnUint32Max && invalid.length > 0) {
               const invalidFills = Object.fromEntries(
-                invalid.map(({ relayer, destinationChainId, depositId, txnRef }) => {
-                  return [relayer, { destinationChainId, depositId, txnRef }];
+                invalid.map(({ relayer, destinationChainId, depositId, txnRef, outputAmount }) => {
+                  return [relayer, { destinationChainId, depositId, txnRef, outputAmount }];
                 })
               );
               this.logger.warn({
                 at: "SpokePoolClient",
                 chainId: destinationChainId,
-                message: `Invalid fills found matching ${getNetworkName(deposit.originChainId)} deposit.`,
-                deposit,
+                message: `Unfilled deposit found matching ${getNetworkName(deposit.originChainId)} deposit.`,
+                depositOutputAmount: deposit.outputAmount.toString(),
+                depositTxnRef: deposit.txnRef,
                 invalidFills,
-                notificationPath: "across-invalid-fills",
+                notificationPath: "across-unfilled-deposits",
               });
             }
 
@@ -488,6 +493,11 @@ export class Monitor {
     const l1Tokens = this.getL1TokensForRelayerBalancesReport();
     for (const relayer of this.monitorConfig.monitoredRelayers) {
       for (const chainId of this.monitorChains) {
+        // If the monitored relayer address is invalid on the monitored chain (e.g. the monitored relayer is a base58 address while the chain ID is mainnet),
+        // then there is no balance to update in this loop.
+        if (!relayer.isValidOn(chainId)) {
+          continue;
+        }
         const l2ToL1Tokens = this.getL2ToL1TokenMap(l1Tokens, chainId);
         const l2TokenAddresses = Object.keys(l2ToL1Tokens);
         const tokenBalances = await this._getBalances(
@@ -1190,6 +1200,90 @@ export class Monitor {
     }
   }
 
+  async closePDAs(): Promise<void> {
+    const simulate = process.env["SEND_TRANSACTIONS"] !== "true";
+    const svmSpokePoolClient = this.clients.spokePoolClients[CHAIN_IDs.SOLANA];
+    if (!isSVMSpokePoolClient(svmSpokePoolClient)) {
+      return;
+    }
+    const fills: FillWithBlock[] = [];
+    for (const relayers of this.monitorConfig.monitoredRelayers) {
+      if (relayers.isSVM()) {
+        const relayerFills = svmSpokePoolClient.getFillsForRelayer(relayers);
+        fills.push(...relayerFills);
+      }
+    }
+    const spokePoolProgramId = address(svmSpokePoolClient.spokePoolAddress.toBase58());
+    const signer = await getKitKeypairFromEvmSigner(this.clients.hubPoolClient.hubPool.signer);
+    const svmRpc = svmSpokePoolClient.svmEventsClient.getRpc();
+
+    for (const fill of fills) {
+      const relayData = getRelayDataFromFill(fill);
+      const relayDataWithMessageHash = {
+        ...relayData,
+        messageHash: fill.messageHash,
+      };
+      const fillStatus = await svmSpokePoolClient.relayFillStatus(relayDataWithMessageHash, fill.destinationChainId);
+      // If fill PDA should not be closed, skip.
+      if (!this._shouldCloseFillPDA(fillStatus, fill.fillDeadline, svmSpokePoolClient.getCurrentTime())) {
+        this.logger.info({
+          at: "Monitor#closePDAs",
+          message: `Not ready to close PDA for fill ${fill.txnRef}`,
+          fill,
+        });
+        continue;
+      }
+
+      const fillStatusPda = await getFillStatusPda(
+        spokePoolProgramId,
+        relayDataWithMessageHash,
+        fill.destinationChainId
+      );
+      // Check if PDA is already closed
+      const fillStatusPdaAccount = await fetchEncodedAccount(svmRpc, fillStatusPda);
+      if (!fillStatusPdaAccount.exists) {
+        continue;
+      }
+
+      const closePdaInstruction = await arch.svm.createCloseFillPdaInstruction(signer, svmRpc, fillStatusPda);
+      const signedTransaction = await signTransactionMessageWithSigners(closePdaInstruction);
+      const encodedTransaction = getBase64EncodedWireTransaction(signedTransaction);
+
+      if (simulate) {
+        const result = await svmRpc
+          .simulateTransaction(encodedTransaction, {
+            encoding: "base64",
+          })
+          .send();
+        if (result.value.err) {
+          this.logger.error({
+            at: "Monitor#closePDAs",
+            message: `Failed to close PDA for fill ${fill.txnRef}`,
+            error: result.value.err,
+          });
+        }
+        continue;
+      }
+
+      try {
+        await svmRpc
+          .sendTransaction(encodedTransaction, { preflightCommitment: "confirmed", encoding: "base64" })
+          .send();
+
+        this.logger.info({
+          at: "Monitor#closePDAs",
+          message: `Closed PDA ${fillStatusPda} for fill ${fill.txnRef}`,
+        });
+      } catch (err) {
+        this.logger.error({
+          at: "Monitor#closePDAs",
+          message: `Failed to close PDA for fill ${fill.txnRef}`,
+          error: err,
+        });
+      }
+    }
+  }
+
   async updateLatestAndFutureRelayerRefunds(relayerBalanceReport: RelayerBalanceReport): Promise<void> {
     const validatedBundleRefunds: CombinedRefunds[] =
       await this.clients.bundleDataClient.getPendingRefundsFromValidBundles();
@@ -1390,15 +1484,20 @@ export class Monitor {
         this.spokePoolsBlocks[chainId].startingBlock = startingBlock;
         this.spokePoolsBlocks[chainId].endingBlock = endingBlock;
       } else if (isSVMSpokePoolClient(spokePoolClient)) {
-        const latestSlot = Number(await spokePoolClient.svmEventsClient.getRpc().getSlot().send());
+        const svmProvider = await spokePoolClient.svmEventsClient.getRpc();
+        const { slot: latestSlot } = await arch.svm.getNearestSlotTime(
+          svmProvider,
+          { commitment: "confirmed" },
+          spokePoolClient.logger
+        );
         const endingBlock = this.monitorConfig.spokePoolsBlocks[chainId]?.endingBlock;
         this.monitorConfig.spokePoolsBlocks[chainId] ??= { startingBlock: undefined, endingBlock: undefined };
         if (this.monitorConfig.pollingDelay === 0) {
-          this.monitorConfig.spokePoolsBlocks[chainId].startingBlock ??= latestSlot;
+          this.monitorConfig.spokePoolsBlocks[chainId].startingBlock ??= Number(latestSlot);
         } else {
           this.monitorConfig.spokePoolsBlocks[chainId].startingBlock = endingBlock;
         }
-        this.monitorConfig.spokePoolsBlocks[chainId].endingBlock = latestSlot;
+        this.monitorConfig.spokePoolsBlocks[chainId].endingBlock = Number(latestSlot);
       }
     }
   }
@@ -1461,8 +1560,17 @@ export class Monitor {
           this.balanceCache[chainId][token.toBytes32()][account.toBytes32()] = balance;
           return balance;
         }
-        // @todo _getBalances is unimplemented for SVM.
-        return bnZero;
+        // Assert balance request has solana types.
+        assert(isSVMSpokePoolClient(spokePoolClient));
+        assert(token.isSVM());
+        assert(account.isSVM());
+        const provider = spokePoolClient.svmEventsClient.getRpc();
+        if (!token.eq(getNativeTokenAddressForChain(chainId))) {
+          return getSolanaTokenBalance(provider, token, account);
+        } else {
+          const balanceInLamports = await provider.getBalance(arch.svm.toAddress(account)).send();
+          return toBN(Number(balanceInLamports.value));
+        }
       })
     );
   }
@@ -1472,7 +1580,7 @@ export class Monitor {
       decimalrequests.map(async ({ chainId, token }) => {
         const gasTokenAddressForChain = getNativeTokenAddressForChain(chainId);
         if (token.eq(gasTokenAddressForChain)) {
-          return 18;
+          return chainIsEvm(chainId) ? 18 : 9;
         } // Assume all EVM chains have 18 decimal native tokens.
         if (this.decimals[chainId]?.[token.toBytes32()]) {
           return this.decimals[chainId][token.toBytes32()];
@@ -1502,5 +1610,9 @@ export class Monitor {
       }
     }
     return false;
+  }
+
+  private _shouldCloseFillPDA(fillStatus: FillStatus, fillDeadline: number, currentTime: number): boolean {
+    return fillStatus === FillStatus.Filled && currentTime > fillDeadline;
   }
 }

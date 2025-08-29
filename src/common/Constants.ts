@@ -11,6 +11,7 @@ import {
   EvmAddress,
   toWei,
   BigNumber,
+  winston,
 } from "../utils";
 import {
   BaseBridgeAdapter,
@@ -145,7 +146,7 @@ export const CHAIN_MAX_BLOCK_LOOKBACK = {
   [CHAIN_IDs.LENS]: 10000,
   [CHAIN_IDs.LINEA]: 5000,
   [CHAIN_IDs.LISK]: 10000,
-  [CHAIN_IDs.MAINNET]: 5000,
+  [CHAIN_IDs.MAINNET]: 10000,
   [CHAIN_IDs.MODE]: 10000,
   [CHAIN_IDs.OPTIMISM]: 10000, // Quick
   [CHAIN_IDs.POLYGON]: 10000,
@@ -404,7 +405,14 @@ export const TOKEN_APPROVALS_TO_FIRST_ZERO: Record<number, string[]> = {
 };
 
 // Type alias for a function which takes in arbitrary arguments and outputs a BaseBridgeAdapter class.
-type L1BridgeConstructor<T extends BaseBridgeAdapter> = new (...args: any[]) => T;
+type L1BridgeConstructor<T extends BaseBridgeAdapter> = new (
+  l2chainId: number,
+  hubChainId: number,
+  l1Signer: Signer,
+  l2SignerOrProvider: any,
+  l1Token: EvmAddress,
+  logger: winston.Logger
+) => T;
 
 // Map of chain IDs to all "canonical bridges" for the given chain. Canonical is loosely defined -- in this
 // case, it is the default bridge for the given chain.
@@ -643,10 +651,18 @@ export const DEFAULT_ARWEAVE_GATEWAY = { url: "arweave.net", port: 443, protocol
 export const ARWEAVE_TAG_BYTE_LIMIT = 2048;
 
 // Chains with slow (> 2 day liveness) canonical L2-->L1 bridges that we prioritize taking repayment on.
-// This does not include all 7-day withdrawal chains because we don't necessarily prefer being repaid on some of these 7-day chains, like Mode.
+// This does not include all 7-day withdrawal chains because we don't necessarily prefer being repaid on some of these 7-day chains.
 // This list should generally exclude Lite chains because the relayer ignores HubPool liquidity in that case which could cause the
 // relayer to unintentionally overdraw the HubPool's available reserves.
-export const SLOW_WITHDRAWAL_CHAINS = [CHAIN_IDs.ARBITRUM, CHAIN_IDs.BASE, CHAIN_IDs.OPTIMISM, CHAIN_IDs.BLAST];
+export const SLOW_WITHDRAWAL_CHAINS = [
+  CHAIN_IDs.ARBITRUM,
+  CHAIN_IDs.BASE,
+  CHAIN_IDs.BLAST,
+  CHAIN_IDs.INK,
+  CHAIN_IDs.OPTIMISM,
+  CHAIN_IDs.SONEIUM,
+  CHAIN_IDs.UNICHAIN,
+];
 
 // Arbitrum Orbit chains may have custom gateways for certain tokens. These gateways need to be specified since token approvals are directed at the
 // gateway, while function calls are directed at the gateway router.
@@ -892,7 +908,7 @@ export const ARBITRUM_ORBIT_L1L2_MESSAGE_FEE_DATA: {
     // Amount of tokens required to send a single message to the L2
     amountWei: number;
     // Multiple of the required amount above to send to the feePayer in case
-    // we are short funds. For example, if set to 10, then everytime we need to load more funds
+    // we are short funds. For example, if set to 10, then every time we need to load more funds
     // we'll send 10x the required amount.
     amountMultipleToFund: number;
     // Account that pays the fees on-chain that we will load more fee tokens into.

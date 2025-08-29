@@ -19,14 +19,13 @@ import {
   CHAIN_IDs,
   EvmGasPriceEstimate,
   SVMProvider,
-  getNetworkName,
+  parseUnits,
 } from "../utils";
 import {
   CompilableTransactionMessage,
-  compileTransaction,
   KeyPairSigner,
-  signTransaction,
   getBase64EncodedWireTransaction,
+  signTransactionMessageWithSigners,
   type Blockhash,
 } from "@solana/kit";
 
@@ -141,10 +140,20 @@ export async function runTransaction(
       gasLimit
     );
 
+    const flooredPriorityFeePerGas = parseUnits(process.env[`MIN_PRIORITY_FEE_PER_GAS_${chainId}`] || "0", 9);
+
     // Check if the chain requires legacy transactions
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
-      // For legacy chains, explicitly set type to 0 and ensure only gasPrice is present
+      // For legacy chains ensure only gasPrice is present
       gas = { gasPrice: gas.gasPrice || gas.maxFeePerGas };
+    } else {
+      // If the priority fee was overridden by the min/floor value, the base fee must be scaled up as well.
+      const maxPriorityFeePerGas = sdkUtils.bnMax(gas.maxPriorityFeePerGas, flooredPriorityFeePerGas);
+      const baseFeeDelta = maxPriorityFeePerGas.sub(gas.maxPriorityFeePerGas);
+      gas = {
+        maxFeePerGas: gas.maxFeePerGas.add(baseFeeDelta),
+        maxPriorityFeePerGas,
+      };
     }
 
     logger.debug({
@@ -156,6 +165,7 @@ export async function runTransaction(
       value,
       nonce,
       gas,
+      flooredPriorityFeePerGas,
       gasLimit,
       priorityFeeScaler,
       maxFeePerGasScaler,
@@ -236,15 +246,36 @@ export async function runTransaction(
   }
 }
 
-export async function runTransactionSvm(
+export async function sendAndConfirmSolanaTransaction(
   unsignedTransaction: CompilableTransactionMessage,
   signer: KeyPairSigner,
-  provider: SVMProvider
+  provider: SVMProvider,
+  cycles = 25,
+  pollingDelay = 600 // 1.5 slots on Solana.
 ): Promise<string> {
-  const compiledTx = compileTransaction(unsignedTransaction);
-  const signedTx = await signTransaction([signer.keyPair], compiledTx);
+  const delay = (ms: number) => {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  };
+  const signedTx = await signTransactionMessageWithSigners(unsignedTransaction);
   const serializedTx = getBase64EncodedWireTransaction(signedTx);
-  return provider.sendTransaction(serializedTx, { encoding: "base64" }).send();
+  const txSignature = await provider
+    .sendTransaction(serializedTx, { preflightCommitment: "confirmed", skipPreflight: false, encoding: "base64" })
+    .send();
+  let confirmed = false;
+  let _cycles = 0;
+  while (!confirmed && _cycles < cycles) {
+    const txStatus = await provider.getSignatureStatuses([txSignature]).send();
+    // Index 0 since we are only sending a single transaction in this method.
+    confirmed =
+      txStatus?.value?.[0]?.confirmationStatus === "confirmed" ||
+      txStatus?.value?.[0]?.confirmationStatus === "finalized";
+    // If the transaction wasn't confirmed, wait `pollingInterval` and retry.
+    if (!confirmed) {
+      await delay(pollingDelay);
+      _cycles++;
+    }
+  }
+  return txSignature;
 }
 
 export async function getGasPrice(

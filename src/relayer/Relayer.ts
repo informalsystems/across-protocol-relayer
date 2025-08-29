@@ -1,7 +1,7 @@
 import assert from "assert";
 import { utils as sdkUtils, arch } from "@across-protocol/sdk";
 import { utils as ethersUtils } from "ethers";
-import { FillStatus, Deposit, DepositWithBlock } from "../interfaces";
+import { FillStatus, Deposit, DepositWithBlock, SpokePoolClientsByChain } from "../interfaces";
 import { updateSpokePoolClients } from "../common";
 import {
   BigNumber,
@@ -32,9 +32,6 @@ import {
 import { RelayerClients } from "./RelayerClientHelper";
 import { RelayerConfig } from "./RelayerConfig";
 import { MultiCallerClient } from "../clients";
-import { time } from "console";
-import { times } from "lodash";
-import { date } from "superstruct";
 
 const { getAddress } = ethersUtils;
 const { isDepositSpedUp, isMessageEmpty, resolveDepositMessage } = sdkUtils;
@@ -253,9 +250,15 @@ export class Relayer {
         message: "Skipping deposit that is not supported by this relayer version.",
         latestVersionSupported: configStoreClient.configStoreVersion,
         latestInConfigStore: configStoreClient.getConfigStoreVersionForTimestamp(),
-        deposit: convertRelayDataParamsToBytes32(deposit),
+        deposit,
       });
       return ignoreDeposit();
+    }
+
+    // No need to consider fills with exclusivity until after their exclusivity period has elapsed.
+    const relayer = this.getRelayerAddrOn(destinationChainId);
+    if (this.fillIsExclusive(deposit) && !deposit.exclusiveRelayer.eq(relayer)) {
+      return false;
     }
 
     if (sdkUtils.invalidOutputToken(deposit)) {
@@ -271,7 +274,7 @@ export class Relayer {
       this.logger.debug({
         at: "Relayer::filterDeposit",
         message: "Skipping deposit from or to disabled chains.",
-        deposit: convertRelayDataParamsToBytes32(deposit),
+        deposit,
         enabledOriginChains: this.config.relayerOriginChains,
         enabledDestinationChains: this.config.relayerDestinationChains,
       });
@@ -279,16 +282,16 @@ export class Relayer {
     }
 
     const badOriginChainAddrs = [deposit.depositor, deposit.inputToken].some((address) => {
-      return !address.isValidOn(deposit.originChainId);
+      return !address.isValidOn(originChainId);
     });
-    const badDestChainAddrs = [deposit.recipient, deposit.exclusiveRelayer, deposit.outputToken].some((address) => {
-      return !address.isValidOn(deposit.destinationChainId);
+    const badDestChainAddrs = [deposit.recipient, deposit.outputToken].some((address) => {
+      return !address.isValidOn(destinationChainId);
     });
     if (badOriginChainAddrs || badDestChainAddrs) {
       this.logger.debug({
         at: "Relayer::filterDeposit",
         message: `Skipping ${srcChain} deposit due to invalid address.`,
-        deposit: convertRelayDataParamsToBytes32(deposit),
+        deposit,
       });
       return ignoreDeposit();
     }
@@ -297,8 +300,8 @@ export class Relayer {
       this.logger.debug({
         at: "Relayer::filterDeposit",
         message: `Ignoring ${srcChain} deposit destined for ${dstChain}.`,
-        depositor: depositor.toNative(),
-        recipient: recipient.toNative(),
+        depositor,
+        recipient,
         txnRef: deposit.txnRef,
       });
       return ignoreDeposit();
@@ -310,9 +313,9 @@ export class Relayer {
     if (relayerTokens.length > 0 && !relayerTokens.some((token) => token.eq(l1Token))) {
       this.logger.debug({
         at: "Relayer::filterDeposit",
-        message: "Skipping deposit for unwhitelisted token",
-        deposit: convertRelayDataParamsToBytes32(deposit),
-        l1Token: l1Token.toNative(),
+        message: "Skipping deposit for unsupported token.",
+        deposit,
+        l1Token,
       });
       return ignoreDeposit();
     }
@@ -324,7 +327,7 @@ export class Relayer {
         message: "Skipping deposit including in-protocol token swap.",
         originChainId,
         destinationChainId,
-        outputToken: deposit.outputToken.toNative(),
+        outputToken: deposit.outputToken,
         txnRef: deposit.txnRef,
         notificationPath: "across-unprofitable-fills",
       });
@@ -338,7 +341,7 @@ export class Relayer {
         at: "Relayer::filterDeposit",
         message: `Skipping ${srcChain} deposit due to uncertain fill amount.`,
         destinationChainId,
-        outputToken: deposit.outputToken.toNative(),
+        outputToken: deposit.outputToken,
         txnRef: deposit.txnRef,
       });
       return ignoreDeposit();
@@ -350,30 +353,21 @@ export class Relayer {
         at: "Relayer::filterDeposit",
         message: "Skipping fill for deposit with message",
         depositUpdated: isDepositSpedUp(deposit),
-        deposit: convertRelayDataParamsToBytes32(deposit),
+        deposit,
       });
       return ignoreDeposit();
     }
 
     // Skip deposits that contain invalid fills from the same relayer. This prevents potential corrupted data from
     // making the same relayer fill a deposit multiple times.
-    if (
-      !acceptInvalidFills &&
-      invalidFills.some((fill) => fill.relayer.eq(this.getRelayerAddrOn(fill.destinationChainId)))
-    ) {
+    if (!acceptInvalidFills && invalidFills.some((fill) => fill.relayer.eq(relayer))) {
       this.logger.error({
         at: "Relayer::filterDeposit",
         message: "👨‍👧‍👦 Skipping deposit with invalid fills from the same relayer",
-        deposit: convertRelayDataParamsToBytes32(deposit),
+        deposit,
         invalidFills,
         destinationChainId,
       });
-      return ignoreDeposit();
-    }
-
-    // It would be preferable to use host time since it's more reliably up-to-date, but this creates issues in test.
-    const currentTime = spokePoolClients[destinationChainId].getCurrentTime();
-    if (deposit.fillDeadline <= currentTime) {
       return ignoreDeposit();
     }
 
@@ -385,7 +379,7 @@ export class Relayer {
       this.logger.debug({
         at: "Relayer::filterDeposit",
         message: `Skipping ${srcChain} deposit due to insufficient deposit confirmations.`,
-        depositId: depositId.toString(),
+        depositId,
         blockNumber,
         confirmations: latestHeightSearched - blockNumber,
         minConfirmations,
@@ -407,13 +401,6 @@ export class Relayer {
       return false;
     }
 
-    if (
-      this.fillIsExclusive(deposit) &&
-      !deposit.exclusiveRelayer.eq(this.getRelayerAddrOn(deposit.destinationChainId))
-    ) {
-      return false;
-    }
-
     // We query the relayer API to get the deposit limits for different token and origin combinations.
     // The relayer should *not* be filling deposits that the HubPool doesn't have liquidity for otherwise the relayer's
     // refund will be stuck for potentially 7 days. Note: Filter for supported tokens first, since the relayer only
@@ -426,9 +413,9 @@ export class Relayer {
           at: "Relayer::filterDeposit",
           message: "😱 Skipping deposit with greater unfilled amount than API suggested limit",
           limit,
-          l1Token: l1Token.toNative(),
-          depositId: depositId.toString(),
-          inputToken: inputToken.toNative(),
+          l1Token,
+          depositId,
+          inputToken,
           inputAmount,
           originChainId,
           txnRef: deposit.txnRef,
@@ -448,18 +435,29 @@ export class Relayer {
    */
   private _getUnfilledDeposits(): Record<number, RelayerUnfilledDeposit[]> {
     const { hubPoolClient, spokePoolClients } = this.clients;
-    const { relayerDestinationChains } = this.config;
+    const { relayerDestinationChains, relayerOriginChains } = this.config;
+
+    // Extract origin and destination spoke pool chains
+    const originSpokePoolClients: SpokePoolClientsByChain = Object.fromEntries(
+      Object.values(spokePoolClients)
+        .filter(({ chainId }) => relayerOriginChains?.includes(chainId) ?? true)
+        .map((spokePoolClient) => [spokePoolClient.chainId, spokePoolClient])
+    );
+
+    const destinationSpokePoolClients: SpokePoolClientsByChain = Object.fromEntries(
+      Object.values(spokePoolClients)
+        .filter(({ chainId }) => relayerDestinationChains?.includes(chainId) ?? true)
+        .map((spokePoolClient) => [spokePoolClient.chainId, spokePoolClient])
+    );
 
     // Filter the resulting deposits according to relayer configuration.
     return Object.fromEntries(
-      Object.values(spokePoolClients)
-        .filter(({ chainId }) => relayerDestinationChains?.includes(chainId) ?? true)
-        .map(({ chainId: destinationChainId }) => [
-          destinationChainId,
-          getUnfilledDeposits(destinationChainId, spokePoolClients, hubPoolClient, this.fillStatus).filter((deposit) =>
-            this.filterDeposit(deposit)
-          ),
-        ])
+      Object.values(destinationSpokePoolClients).map((destinationSpokePoolClient) => [
+        destinationSpokePoolClient.chainId,
+        getUnfilledDeposits(destinationSpokePoolClient, originSpokePoolClients, hubPoolClient, this.fillStatus).filter(
+          (deposit) => this.filterDeposit(deposit)
+        ),
+      ])
     );
   }
 
@@ -755,77 +753,75 @@ export class Relayer {
     }
 
     const l1Token = this.clients.inventoryClient.getL1TokenAddress(inputToken, originChainId);
-    if (tokenClient.hasBalanceForFill(deposit)) {
-      const { repaymentChainId, repaymentChainProfitability } = await this.resolveRepaymentChain(
-        deposit,
-        l1Token,
-        lpFees
-      );
-      const {
-        relayerFeePct,
-        gasCost,
-        gasLimit: _gasLimit,
-        lpFeePct: realizedLpFeePct,
-        gasPrice,
-        maxGasUsd,
-        gasTokenPriceUsd,
-      } = repaymentChainProfitability;
-      if (!isDefined(repaymentChainId)) {
-        profitClient.captureUnprofitableFill(deposit, realizedLpFeePct, relayerFeePct, gasCost);
-        const relayKey = sdkUtils.getRelayEventKey(deposit);
-        this.ignoredDeposits[relayKey] = true;
-      } else {
-        const { blockNumber, outputToken, outputAmount } = deposit;
-        const fillAmountUsd = profitClient.getFillAmountInUsd(deposit);
-        if (!isDefined(fillAmountUsd)) {
-          return;
-        }
-        const limitIdx = this.findOriginChainLimitIdx(originChainId, blockNumber);
 
-        // Ensure that a limit was identified, and that no upper thresholds would be breached by filling this deposit.
-        if (this.originChainOvercommitted(originChainId, fillAmountUsd, limitIdx)) {
-          const limits = this.fillLimits[originChainId].slice(limitIdx);
-          this.logger.debug({
-            at: "Relayer::evaluateFill",
-            message: `Skipping ${originChain} deposit ${depositId.toString()} due to anticipated origin chain overcommitment.`,
-            blockNumber,
-            fillAmountUsd,
-            limits,
-            txnRef,
-          });
-          return;
-        }
+    const { repaymentChainId, repaymentChainProfitability } = await this.resolveRepaymentChain(
+      deposit,
+      l1Token,
+      lpFees
+    );
+    const {
+      relayerFeePct,
+      gasCost,
+      gasLimit: _gasLimit,
+      lpFeePct: realizedLpFeePct,
+      gasPrice,
+      maxGasUsd,
+      gasTokenPriceUsd,
+    } = repaymentChainProfitability;
 
-        // Update the origin chain limits in anticipation of committing tokens to a fill.
-        this.reduceOriginChainLimit(originChainId, fillAmountUsd, limitIdx);
+    const hasBalance = tokenClient.hasBalanceForFill(deposit);
+    const isProfitable = isDefined(repaymentChainId);
 
-        // Update local balance to account for the enqueued fill.
-        tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
-
-        const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
-
-        // Enhanced gas pricing data is now calculated in resolveRepaymentChain
-        // and passed through repaymentChainProfitability
-        this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, depositId, maxGasUsd, gasTokenPriceUsd);
+    if (!hasBalance || !isProfitable) {
+      if (isProfitable && !hasBalance) {
+        // For profitable deposits where the relayer has insufficient balance, log it for potential rebalancing.
+        tokenClient.captureTokenShortfallForFill(deposit);
       }
-    } else {
-      // Exit early if we want to request a slow fill for a lite chain.
-      if (depositForcesOriginChainRepayment(deposit, this.clients.hubPoolClient)) {
-        this.logger.debug({
-          at: "Relayer::evaluateFill",
-          message: "Skipping requesting slow fill for deposit that forces origin chain repayment",
-          originChainId,
-          depositId: depositId.toString(),
-        });
-        return;
-      }
-      // TokenClient.getBalance returns that we don't have enough balance to submit the fast fill.
-      // At this point, capture the shortfall so that the inventory manager can rebalance the token inventory.
-      tokenClient.captureTokenShortfallForFill(deposit);
+
       if (sendSlowRelays && fillStatus === FillStatus.Unfilled) {
         this.requestSlowFill(deposit);
       }
+
+      // Limit the ability of persistently-unprofitable deposits to congest the deposit/fill evaluation pipeline.
+      if (!isProfitable) {
+        profitClient.captureUnprofitableFill(deposit, realizedLpFeePct, relayerFeePct, gasCost);
+
+        const relayKey = sdkUtils.getRelayEventKey(deposit);
+        this.ignoredDeposits[relayKey] = true;
+      }
+      return;
     }
+
+    // Deposit is known to be profitable.
+    const { blockNumber, outputToken, outputAmount } = deposit;
+    const fillAmountUsd = profitClient.getFillAmountInUsd(deposit);
+    if (!isDefined(fillAmountUsd)) {
+      return;
+    }
+    const limitIdx = this.findOriginChainLimitIdx(originChainId, blockNumber);
+
+    // Ensure that a limit was identified, and that no upper thresholds would be breached by filling this deposit.
+    if (this.originChainOvercommitted(originChainId, fillAmountUsd, limitIdx)) {
+      const limits = this.fillLimits[originChainId].slice(limitIdx);
+      this.logger.debug({
+        at: "Relayer::evaluateFill",
+        message: `Skipping ${originChain} deposit ${depositId} due to anticipated origin chain overcommitment.`,
+        blockNumber,
+        fillAmountUsd,
+        limits,
+        txnRef,
+      });
+      return;
+    }
+
+    // Update the origin chain limits in anticipation of committing tokens to a fill.
+    this.reduceOriginChainLimit(originChainId, fillAmountUsd, limitIdx);
+
+    // Update local balance to account for the enqueued fill.
+    tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
+
+    const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
+    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, maxGasUsd, gasTokenPriceUsd);
   }
 
   /**
@@ -1067,7 +1063,7 @@ export class Relayer {
       this.logger.debug({
         at: "Relayer::requestSlowFill",
         message: "Prevent requesting slow fill request from chain that forces origin chain repayment or to lite chain.",
-        deposit: convertRelayDataParamsToBytes32(deposit),
+        deposit,
       });
       return;
     }
