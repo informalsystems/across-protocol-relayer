@@ -198,7 +198,7 @@ export class Relayer {
 
     this.logger.debug({
       at: "Relayer::runMaintenance",
-      message: `Completed relayer maintenance.`,
+      message: "Completed relayer maintenance.",
     });
   }
 
@@ -811,7 +811,16 @@ export class Relayer {
     tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
 
     const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
-    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, depositId, maxGasUsd, gasTokenPriceUsd);
+    this.fillRelay(
+      deposit,
+      repaymentChainId,
+      realizedLpFeePct,
+      gasPrice,
+      gasLimit,
+      depositId,
+      maxGasUsd,
+      gasTokenPriceUsd
+    );
   }
 
   /**
@@ -820,8 +829,9 @@ export class Relayer {
    * @returns A string identifying the deposit in a BatchLPFees object.
    */
   getLPFeeKey(relayData: Pick<Deposit, "originChainId" | "inputToken" | "inputAmount" | "quoteTimestamp">): string {
-    return `${relayData.originChainId}-${relayData.inputToken.toBytes32()}-${relayData.inputAmount}-${relayData.quoteTimestamp
-      }`;
+    return `${relayData.originChainId}-${relayData.inputToken.toBytes32()}-${relayData.inputAmount}-${
+      relayData.quoteTimestamp
+    }`;
   }
 
   /**
@@ -1069,7 +1079,7 @@ export class Relayer {
         mrkdwn: formatSlowFillRequestMarkdown(),
         depositId: depositId,
         maxGasUsd: undefined, // Not applicable for slow fill requests
-        gasTokenPriceUsd: undefined // Not applicable for slow fill requests
+        gasTokenPriceUsd: undefined, // Not applicable for slow fill requests
       });
     } else {
       assert(isSVMSpokePoolClient(spokePoolClient));
@@ -1138,27 +1148,27 @@ export class Relayer {
     if (isEVMSpokePoolClient(spokePoolClient)) {
       const [method, messageModifier, args] = !isDepositSpedUp(deposit)
         ? [
-          "fillRelay",
-          "",
-          [
-            convertRelayDataParamsToBytes32(deposit),
-            repaymentChainId,
-            this.getRelayerAddrOn(repaymentChainId).toBytes32(),
-          ],
-        ]
+            "fillRelay",
+            "",
+            [
+              convertRelayDataParamsToBytes32(deposit),
+              repaymentChainId,
+              this.getRelayerAddrOn(repaymentChainId).toBytes32(),
+            ],
+          ]
         : [
-          "fillRelayWithUpdatedDeposit",
-          " with updated parameters ",
-          [
-            convertRelayDataParamsToBytes32(deposit),
-            repaymentChainId,
-            this.getRelayerAddrOn(repaymentChainId).toBytes32(),
-            deposit.updatedOutputAmount,
-            deposit.updatedRecipient.toBytes32(),
-            deposit.updatedMessage,
-            deposit.speedUpSignature,
-          ],
-        ];
+            "fillRelayWithUpdatedDeposit",
+            " with updated parameters ",
+            [
+              convertRelayDataParamsToBytes32(deposit),
+              repaymentChainId,
+              this.getRelayerAddrOn(repaymentChainId).toBytes32(),
+              deposit.updatedOutputAmount,
+              deposit.updatedRecipient.toBytes32(),
+              deposit.updatedMessage,
+              deposit.speedUpSignature,
+            ],
+          ];
 
       const message = `Filled v3 deposit ${messageModifier}🚀`;
       const mrkdwn = this.constructRelayFilledMrkdwn(deposit, repaymentChainId, realizedLpFeePct, gasPrice);
@@ -1177,7 +1187,7 @@ export class Relayer {
         mrkdwn,
         depositId,
         maxGasUsd,
-        gasTokenPriceUsd
+        gasTokenPriceUsd,
       });
     } else {
       assert(isSVMSpokePoolClient(spokePoolClient));
@@ -1337,7 +1347,8 @@ export class Relayer {
     // @dev The following internal function should be the only one used to set `preferredChain` above.
     const getProfitabilityDataForPreferredChainIndex = (preferredChainIndex: number): RepaymentChainProfitability => {
       const lpFeePct = lpFeePcts[preferredChainIndex];
-      const { gasLimit, gasCost, relayerFeePct, gasPrice, maxGasUsd, gasTokenPriceUsd } = repaymentChainProfitabilities[preferredChainIndex];
+      const { gasLimit, gasCost, relayerFeePct, gasPrice, maxGasUsd, gasTokenPriceUsd } =
+        repaymentChainProfitabilities[preferredChainIndex];
       return {
         gasLimit,
         gasCost,
@@ -1359,8 +1370,9 @@ export class Relayer {
       profitabilityData = getProfitabilityDataForPreferredChainIndex(preferredChainIndex);
       this.logger.debug({
         at: "Relayer::resolveRepaymentChain",
-        message: `Selected preferred repayment chain ${preferredChain} for deposit ${depositId.toString()}, #${preferredChainIndex + 1
-          } in eligible chains ${JSON.stringify(preferredChainIds)} list.`,
+        message: `Selected preferred repayment chain ${preferredChain} for deposit ${depositId.toString()}, #${
+          preferredChainIndex + 1
+        } in eligible chains ${JSON.stringify(preferredChainIds)} list.`,
         profitableRepaymentChainIds,
       });
     }
@@ -1486,18 +1498,18 @@ export class Relayer {
             );
           crossChainLog = outstandingCrossChainTransferAmount.gt(0)
             ? " There is " +
-            formatter(
-              this.clients.inventoryClient.crossChainTransferClient
-                .getOutstandingCrossChainTransferAmount(
-                  this.relayerEvmAddress,
-                  chainId,
-                  l1Token,
-                  toAddressType(token, chainId)
-                )
-                // TODO: Add in additional l2Token param here once we can specify it
-                .toString()
-            ) +
-            ` inbound L1->L2 ${symbol} transfers. `
+              formatter(
+                this.clients.inventoryClient.crossChainTransferClient
+                  .getOutstandingCrossChainTransferAmount(
+                    this.relayerEvmAddress,
+                    chainId,
+                    l1Token,
+                    toAddressType(token, chainId)
+                  )
+                  // TODO: Add in additional l2Token param here once we can specify it
+                  .toString()
+              ) +
+              ` inbound L1->L2 ${symbol} transfers. `
             : "";
         }
         mrkdwn +=
@@ -1566,15 +1578,18 @@ export class Relayer {
           ` of input amount ${formattedInputAmount} ${inputSymbol}` +
           ` and output amount ${formattedOutputAmount} ${outputSymbol}` +
           ` from ${getNetworkName(originChainId)} to ${getNetworkName(destinationChainId)}` +
-          `${fromOverallocatedLiteChain
-            ? " is from an over-allocated origin chain and it forces origin chain repayment"
-            : ""
+          `${
+            fromOverallocatedLiteChain
+              ? " is from an over-allocated origin chain and it forces origin chain repayment"
+              : ""
           }` +
-          `${depositFailedToSimulateWithMessage
-            ? ` failed to simulate with message of size ${ethersUtils.hexDataLength(deposit.message)} bytes`
-            : ""
+          `${
+            depositFailedToSimulateWithMessage
+              ? ` failed to simulate with message of size ${ethersUtils.hexDataLength(deposit.message)} bytes`
+              : ""
           }` +
-          `${` with relayerFeePct ${formattedRelayerFeePct}% lpFeePct ${lpFeePct.eq(bnUint256Max) ? "∞" : formattedLpFeePct
+          `${` with relayerFeePct ${formattedRelayerFeePct}% lpFeePct ${
+            lpFeePct.eq(bnUint256Max) ? "∞" : formattedLpFeePct
           }% and gas cost ${gasCost.eq(bnUint256Max) ? "∞" : formattedGasCost} ${gasTokenSymbol}\n`}`;
       });
 

@@ -33,7 +33,7 @@ export interface AugmentedTransaction {
   // with other transactions.
   nonMulticall?: boolean;
   // Optional deposit Id of the fill relay embedded in the tx
-  depositId?: BigNumber,
+  depositId?: BigNumber;
   // Pre-calculated profitability data for gas price enhancement
   maxGasUsd?: BigNumber; // Maximum USD amount available for gas (entire amount, not leftover)
   gasTokenPriceUsd?: BigNumber; // Gas token price in USD for conversion
@@ -48,7 +48,7 @@ export class TransactionClient {
   readonly nonces: { [chainId: number]: number } = {};
 
   // eslint-disable-next-line no-useless-constructor
-  constructor(readonly logger: winston.Logger) { }
+  constructor(readonly logger: winston.Logger) {}
 
   protected _simulate(txn: AugmentedTransaction): Promise<TransactionSimulationResult> {
     return willSucceed(txn);

@@ -250,9 +250,9 @@ export class ProfitClient {
           cause = isError(_cause)
             ? _cause.message
             : // For non-Error objects (including those containing BigInts), use util.inspect for a
-            // readable representation that won’t throw on JSON.stringify. This prints BigInts as
-            // “123n” and provides depth-limited details rather than the unhelpful "[object Object]".
-            inspect(_cause, { depth: 3, breakLength: 120 });
+              // readable representation that won’t throw on JSON.stringify. This prints BigInts as
+              // “123n” and provides depth-limited details rather than the unhelpful "[object Object]".
+              inspect(_cause, { depth: 3, breakLength: 120 });
         }
       }
       this.logger.warn({
@@ -523,10 +523,12 @@ export class ProfitClient {
     lpFeePct: BigNumber,
     l1Token: EvmAddress,
     repaymentChainId: number
-  ): Promise<Pick<FillProfit, "profitable" | "nativeGasCost" | "gasPrice" | "tokenGasCost" | "netRelayerFeePct"> & {
-    maxGasUsd?: BigNumber;
-    gasTokenPriceUsd?: BigNumber;
-  }> {
+  ): Promise<
+    Pick<FillProfit, "profitable" | "nativeGasCost" | "gasPrice" | "tokenGasCost" | "netRelayerFeePct"> & {
+      maxGasUsd?: BigNumber;
+      gasTokenPriceUsd?: BigNumber;
+    }
+  > {
     let profitable = false;
     let netRelayerFeePct = bnZero;
     let nativeGasCost = uint256Max;
