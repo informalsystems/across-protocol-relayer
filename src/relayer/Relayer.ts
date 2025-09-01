@@ -822,7 +822,7 @@ export class Relayer {
     tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
 
     const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
-    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, maxGasUsd, gasTokenPriceUsd);
+    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, depositId, maxGasUsd, gasTokenPriceUsd);
   }
 
   /**
