@@ -33,10 +33,10 @@ dotenv.config();
 
 // Define chains that require legacy (type 0) transactions
 // Can be configured via LEGACY_TRANSACTION_CHAINS environment variable (comma-separated chain IDs)
-// Default includes Base (8453) and Ethereum (1) mainnet chains
-const DEFAULT_LEGACY_CHAINS = [CHAIN_IDs.MAINNET, CHAIN_IDs.BASE, CHAIN_IDs.BSC]; // Ethereum mainnet and Base
-const ENV_LEGACY_CHAINS = process.env.LEGACY_TRANSACTION_CHAINS?.split(',').map(Number).filter(Boolean) || [];
-export const LEGACY_TRANSACTION_CHAINS = [...DEFAULT_LEGACY_CHAINS, ...ENV_LEGACY_CHAINS];
+const DEFAULT_LEGACY_CHAINS = [CHAIN_IDs.BSC];
+const ENV_LEGACY_CHAINS = process.env.LEGACY_TRANSACTION_CHAINS;
+const ENV_LEGACY_CHAINS_PARSED: number[] = ENV_LEGACY_CHAINS ? JSON.parse(ENV_LEGACY_CHAINS) : [];
+export const LEGACY_TRANSACTION_CHAINS = [...DEFAULT_LEGACY_CHAINS, ...ENV_LEGACY_CHAINS_PARSED];
 
 export type TransactionSimulationResult = {
   transaction: AugmentedTransaction;
@@ -205,7 +205,7 @@ export async function runTransaction(
         retriesRemaining,
       });
 
-      return await runTransaction(logger, contract, method, args, value, gasLimit, null, retriesRemaining, maxGasUsd, gasTokenPriceUsd);
+      return await runTransaction(logger, contract, method, args, value, gasLimit, null, retriesRemaining, depositId, maxGasUsd, gasTokenPriceUsd);
     } else {
       // Empirically we have observed that Ethers can produce nested errors, so we try to recurse down them
       // and log them as clearly as possible. For example:
@@ -310,11 +310,11 @@ export async function getGasPrice(
 
   // Log the original oracle gas prices
   logger.debug({
-    at: "GasPrice",
+    at: "TxUtil#getGasPrice",
     message: "Oracle suggested gas prices",
     chainId: chainId,
     method: method,
-    depositId: depositId,
+    depositId: ethers.utils.formatUnits(depositId, "wei"),
     baseFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas.sub(feeData.maxPriorityFeePerGas), "gwei"),
     maxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
     maxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
@@ -330,7 +330,7 @@ export async function getGasPrice(
   // 3. Use it as the effective max fee per gas unit
   // 4. For legacy chains: use simplified calculation without gas fee estimate, for EIP-1559: derive priority fee from gas estimation
 
-  if ((logger) && (maxGasUsd) && (gasTokenPriceUsd) && maxGasUsd.gt(bnZero)) {
+  if (Boolean(process.env.ENHANCE_GAS_PRICE) && logger && maxGasUsd && gasTokenPriceUsd && maxGasUsd.gt(bnZero)) {
     // Gas price is per unit of gas, so divide maxGasUsd by gas limit first
     const gasLimitForCalculation = gasLimit || toBNWei(21000); // Default to 21k gas if not specified
     const maxGasUsdPerGas = maxGasUsd.div(gasLimitForCalculation);
@@ -344,7 +344,7 @@ export async function getGasPrice(
         message: "Enhanced gas price using legacy Tx",
         chainId: chainId,
         method: method,
-        depositId: depositId,
+        depositId: ethers.utils.formatUnits(depositId, "wei"),
         estimatedGasPrice: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
         enhancedGasPrice: ethers.utils.formatUnits(enhancedGasPrice, "gwei"),
         gasLimit: ethers.utils.formatUnits(gasLimitForCalculation, "wei"),
@@ -371,7 +371,7 @@ export async function getGasPrice(
         message: "Enhanced gas prices using EIP-1559",
         chainId: chainId,
         method: method,
-        depositId: depositId,
+        depositId: ethers.utils.formatUnits(depositId, "wei"),
         originalMaxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
         enhancedMaxFeePerGas: ethers.utils.formatUnits(enhancedGasPrice, "gwei"),
         originalMaxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
@@ -390,8 +390,8 @@ export async function getGasPrice(
     }
   } else {
     logger.debug({
-      at: "GasPrice",
-      message: "No leftover USD for gas enhancement, using oracle prices"
+      at: "TxUtil#getGasPrice",
+      message: "Gas enhancement disabled; using oracle prices"
     });
   }
 

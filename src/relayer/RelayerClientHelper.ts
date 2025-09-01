@@ -116,7 +116,6 @@ export async function constructRelayerClients(
 
   // Init HubPoolLookBack to 1h30 in the past instead of 8h per default to restart relayer faster 
   const hubPoolLookBack = sdkUtils.chainIsProd(config.hubPoolChainId) ? 5400 * 1 : Number.POSITIVE_INFINITY;
-  // const hubPoolLookBack = sdkUtils.chainIsProd(config.hubPoolChainId) ? 3600 * 8 : Number.POSITIVE_INFINITY;
 
   const commonClients = await constructClients(logger, config, baseSigner, hubPoolLookBack);
   const { configStoreClient, hubPoolClient, multiCallerClient } = commonClients;

@@ -137,7 +137,6 @@ export class Relayer {
     // Some steps can be skipped on the first run.
     if (this.updated++ > 0) {
       // Clear state from profit and token clients. These should start fresh on each iteration.
-      // TODO: check if these can be disabled
       profitClient.clearUnprofitableFills();
       tokenClient.clearTokenShortfall();
       tokenClient.clearTokenData();
@@ -176,13 +175,6 @@ export class Relayer {
       return; // Nothing to do.
     }
 
-    this.logger.debug({
-      at: "Relayer::runMaintenance",
-      message: "Starting relayer maintenance.",
-    });
-    const tStart = this.profiler.start("runMaintenance");
-
-
     tokenClient.clearTokenData();
     await Promise.all([tokenClient.update(), profitClient.update()]);
     await inventoryClient.wrapL2EthIfAboveThreshold();
@@ -204,11 +196,9 @@ export class Relayer {
     // May be less than maintenanceInterval if these blocking calls are slow.
     this.lastMaintenance = currentTime;
 
-
-    const runTime = performance.now() - tStart.startTime;
     this.logger.debug({
       at: "Relayer::runMaintenance",
-      message: `Completed relayer maintenance in ${runTime} seconds`,
+      message: `Completed relayer maintenance.`,
     });
   }
 
@@ -821,7 +811,7 @@ export class Relayer {
     tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
 
     const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
-    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, maxGasUsd, gasTokenPriceUsd);
+    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, depositId, maxGasUsd, gasTokenPriceUsd);
   }
 
   /**
@@ -906,25 +896,12 @@ export class Relayer {
       fillExecutorClient.clearTransactionQueue(chainId);
       return [];
     }
-    this.logger.info({
-      at: "Relayer::executeFills",
-      message: `executing transaction ${getNetworkName(chainId)}`,
-    });
     pendingTxnHashes[chainId] = (async () => {
-      const responses = await fillExecutorClient.executeTxnQueue(chainId, simulate);
-      this.logger.info({
-        at: "Relayer::executeFills",
-        message: `Full transaction responses for ${getNetworkName(chainId)}`,
-        responses,
-      })
-      return responses.map((response) => response.hash);
+      return (await fillExecutorClient.executeTxnQueue(chainId, simulate)).map((response) => response.hash);
     })();
     const txnReceipts = await pendingTxnHashes[chainId];
     delete pendingTxnHashes[chainId];
-    this.logger.info({
-      at: "Relayer::executeFills",
-      message: `executed transaction ${getNetworkName(chainId)}`,
-    });
+
     return txnReceipts;
   }
 
@@ -968,27 +945,7 @@ export class Relayer {
 
     this.fillLimits = this.computeFillLimits();
 
-
-    if (allUnfilledDeposits.length === 0) {
-      return txnReceipts;
-    }
-
-    this.logger.debug({
-      at: "Relayer::checkForUnfilledDepositsAndFill",
-      message: `Computing Liquidity Provider fees.`,
-    });
-
-    const tStart = this.profiler.start("Compute Lp Fees");
-
     const lpFees = await this.batchComputeLpFees(allUnfilledDeposits);
-
-    const runTime = performance.now() - tStart.startTime;
-    this.logger.debug({
-      at: "Relayer::checkForUnfilledDepositsAndFill",
-      message: `Time to compute LP fees ${runTime} seconds.`
-    });
-
-
     await sdkUtils.forEachAsync(Object.entries(unfilledDeposits), async ([chainId, _deposits]) => {
       if (_deposits.length === 0) {
         return;
@@ -1354,10 +1311,6 @@ export class Relayer {
         maxGasUsd,
         gasTokenPriceUsd,
       } = await profitClient.isFillProfitable(deposit, lpFeePct, hubPoolToken, preferredChainId);
-
-      // Enhanced gas pricing data is now calculated in isFillProfitable
-      // No need to call calculateFillProfitability again
-
       return {
         profitable,
         gasLimit,
