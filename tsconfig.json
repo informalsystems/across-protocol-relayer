@@ -9,15 +9,30 @@
     "resolveJsonModule": true,
     "strict": true,
     "strictNullChecks": false,
-    "noImplicitAny": false
+    "noImplicitAny": false,
+    "types": [
+      "node"
+    ]
   },
-  "include": ["./src", "index.ts", "./scripts"],
-  "files": ["./hardhat.config.ts"],
+  "include": [
+    "./src",
+    "index.ts",
+    "./scripts"
+  ],
+  "files": [
+    "./hardhat.config.ts"
+  ],
   "watchOptions": {
     "watchFile": "useFsEventsOnParentDirectory",
     "watchDirectory": "useFsEvents",
     "fallbackPolling": "dynamicPriority",
     "synchronousWatchDirectory": true,
-    "excludeDirectories": ["**/node_modules", "artifacts", "cache", "contracts", "dist"]
+    "excludeDirectories": [
+      "**/node_modules",
+      "artifacts",
+      "cache",
+      "contracts",
+      "dist"
+    ]
   }
 }

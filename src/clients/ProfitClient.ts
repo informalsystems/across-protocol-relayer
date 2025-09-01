@@ -82,6 +82,8 @@ export type FillProfit = {
   netRelayerFeeUsd: BigNumber; // Relayer fee in USD after paying for gas costs.
   totalFeePct: BigNumber; // Total fee as a portion of the fill amount.
   profitable: boolean; // Fill profitability indicator.
+  minRelayerFeePct: BigNumber; // Minimum required relayer fee percentage.
+  maxGasUsd: BigNumber; // Maximum USD amount available for gas (entire amount, not leftover).
 };
 
 type UnprofitableFill = {
@@ -425,6 +427,9 @@ export class ProfitClient {
     const profitable =
       inputTokenPriceUsd.gt(bnZero) && outputTokenPriceUsd.gt(bnZero) && netRelayerFeePct.gte(minRelayerFeePct);
 
+    // Calculate minimum relayer fee in USD
+    const minRelayerFeeUsd = inputAmountUsd.mul(minRelayerFeePct).div(fixedPoint);
+
     return {
       totalFeePct,
       inputTokenPriceUsd,
@@ -443,6 +448,8 @@ export class ProfitClient {
       netRelayerFeePct,
       netRelayerFeeUsd,
       profitable,
+      minRelayerFeePct,
+      maxGasUsd: grossRelayerFeeUsd.sub(minRelayerFeeUsd), // Entire amount available for gas
     };
   }
 
@@ -516,19 +523,42 @@ export class ProfitClient {
     lpFeePct: BigNumber,
     l1Token: EvmAddress,
     repaymentChainId: number
-  ): Promise<Pick<FillProfit, "profitable" | "nativeGasCost" | "gasPrice" | "tokenGasCost" | "netRelayerFeePct">> {
+  ): Promise<
+    Pick<FillProfit, "profitable" | "nativeGasCost" | "gasPrice" | "tokenGasCost" | "netRelayerFeePct"> & {
+      maxGasUsd?: BigNumber;
+      gasTokenPriceUsd?: BigNumber;
+    }
+  > {
     let profitable = false;
     let netRelayerFeePct = bnZero;
     let nativeGasCost = uint256Max;
     let tokenGasCost = uint256Max;
     let gasPrice = uint256Max;
+    let maxGasUsd: BigNumber | undefined;
+    let gasTokenPriceUsd: BigNumber | undefined;
+
     try {
-      ({ profitable, netRelayerFeePct, nativeGasCost, tokenGasCost, gasPrice } = await this.getFillProfitability(
-        deposit,
-        lpFeePct,
-        l1Token,
-        repaymentChainId
-      ));
+      const fillProfit = await this.getFillProfitability(deposit, lpFeePct, l1Token, repaymentChainId);
+      ({ profitable, netRelayerFeePct, nativeGasCost, tokenGasCost, gasPrice } = fillProfit);
+
+      // Get the maximum USD amount available for gas
+      if (profitable) {
+        maxGasUsd = fillProfit.maxGasUsd;
+        gasTokenPriceUsd = fillProfit.gasTokenPriceUsd;
+
+        this.logger.debug({
+          at: "ProfitClient#isFillProfitable",
+          message: "Calculated maximum gas USD available",
+          depositId: deposit.depositId.toString(),
+          inputAmountUsd: formatEther(fillProfit.inputAmountUsd),
+          outputAmountUsd: formatEther(fillProfit.outputAmountUsd),
+          grossRelayerFeeUsd: formatEther(fillProfit.grossRelayerFeeUsd),
+          minRelayerFeeUsd: formatEther(fillProfit.grossRelayerFeeUsd.sub(fillProfit.maxGasUsd)),
+          minRelayerFeePct: `${formatFeePct(fillProfit.minRelayerFeePct)}%`,
+          maxGasUsd: formatEther(maxGasUsd),
+          gasTokenPriceUsd: formatEther(gasTokenPriceUsd),
+        });
+      }
     } catch (err) {
       this.logger.debug({
         at: "ProfitClient#isFillProfitable",
@@ -544,6 +574,8 @@ export class ProfitClient {
       tokenGasCost,
       gasPrice,
       netRelayerFeePct,
+      maxGasUsd,
+      gasTokenPriceUsd,
     };
   }
 

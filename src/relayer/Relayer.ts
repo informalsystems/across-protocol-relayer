@@ -47,6 +47,9 @@ type RepaymentChainProfitability = {
   gasPrice: BigNumber;
   relayerFeePct: BigNumber;
   lpFeePct: BigNumber;
+  // Enhanced gas pricing data
+  maxGasUsd?: BigNumber; // Maximum USD amount available for gas (entire amount, not leftover)
+  gasTokenPriceUsd?: BigNumber; // Gas token price in USD for conversion
 };
 
 export class Relayer {
@@ -752,6 +755,8 @@ export class Relayer {
       gasLimit: _gasLimit,
       lpFeePct: realizedLpFeePct,
       gasPrice,
+      maxGasUsd,
+      gasTokenPriceUsd,
     } = repaymentChainProfitability;
 
     const hasBalance = tokenClient.hasBalanceForFill(deposit);
@@ -806,7 +811,16 @@ export class Relayer {
     tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
 
     const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
-    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit);
+    this.fillRelay(
+      deposit,
+      repaymentChainId,
+      realizedLpFeePct,
+      gasPrice,
+      gasLimit,
+      depositId,
+      maxGasUsd,
+      gasTokenPriceUsd
+    );
   }
 
   /**
@@ -1063,6 +1077,9 @@ export class Relayer {
         args: [convertRelayDataParamsToBytes32(deposit)],
         message: "Requested slow fill for deposit.",
         mrkdwn: formatSlowFillRequestMarkdown(),
+        depositId: depositId,
+        maxGasUsd: undefined, // Not applicable for slow fill requests
+        gasTokenPriceUsd: undefined, // Not applicable for slow fill requests
       });
     } else {
       assert(isSVMSpokePoolClient(spokePoolClient));
@@ -1098,7 +1115,10 @@ export class Relayer {
     repaymentChainId: number,
     realizedLpFeePct: BigNumber,
     gasPrice: BigNumber,
-    gasLimit?: BigNumber
+    gasLimit?: BigNumber,
+    depositId?: BigNumber,
+    maxGasUsd?: BigNumber,
+    gasTokenPriceUsd?: BigNumber
   ): void {
     const { spokePoolClients } = this.clients;
 
@@ -1157,7 +1177,18 @@ export class Relayer {
       const chainId = deposit.destinationChainId;
       const multiCallerClient = this.getMulticaller(chainId);
 
-      multiCallerClient.enqueueTransaction({ contract, chainId, method, args, gasLimit, message, mrkdwn });
+      multiCallerClient.enqueueTransaction({
+        contract,
+        chainId,
+        method,
+        args,
+        gasLimit,
+        message,
+        mrkdwn,
+        depositId,
+        maxGasUsd,
+        gasTokenPriceUsd,
+      });
     } else {
       assert(isSVMSpokePoolClient(spokePoolClient));
       assert(spokePoolClient.spokePoolAddress.isSVM());
@@ -1243,6 +1274,8 @@ export class Relayer {
           gasPrice: bnUint256Max,
           relayerFeePct: bnZero,
           lpFeePct: bnUint256Max,
+          maxGasUsd: undefined,
+          gasTokenPriceUsd: undefined,
         },
       };
     }
@@ -1276,6 +1309,8 @@ export class Relayer {
       gasCost: BigNumber;
       gasPrice: BigNumber;
       relayerFeePct: BigNumber;
+      maxGasUsd?: BigNumber;
+      gasTokenPriceUsd?: BigNumber;
     }> => {
       const {
         profitable,
@@ -1283,6 +1318,8 @@ export class Relayer {
         tokenGasCost: gasCost,
         gasPrice,
         netRelayerFeePct: relayerFeePct, // net relayer fee is equal to total fee minus the lp fee.
+        maxGasUsd,
+        gasTokenPriceUsd,
       } = await profitClient.isFillProfitable(deposit, lpFeePct, hubPoolToken, preferredChainId);
       return {
         profitable,
@@ -1290,6 +1327,8 @@ export class Relayer {
         gasCost,
         gasPrice,
         relayerFeePct,
+        maxGasUsd,
+        gasTokenPriceUsd,
       };
     };
 
@@ -1308,13 +1347,16 @@ export class Relayer {
     // @dev The following internal function should be the only one used to set `preferredChain` above.
     const getProfitabilityDataForPreferredChainIndex = (preferredChainIndex: number): RepaymentChainProfitability => {
       const lpFeePct = lpFeePcts[preferredChainIndex];
-      const { gasLimit, gasCost, relayerFeePct, gasPrice } = repaymentChainProfitabilities[preferredChainIndex];
+      const { gasLimit, gasCost, relayerFeePct, gasPrice, maxGasUsd, gasTokenPriceUsd } =
+        repaymentChainProfitabilities[preferredChainIndex];
       return {
         gasLimit,
         gasCost,
         gasPrice,
         relayerFeePct,
         lpFeePct,
+        maxGasUsd,
+        gasTokenPriceUsd,
       };
     };
     let profitabilityData: RepaymentChainProfitability = getProfitabilityDataForPreferredChainIndex(0);

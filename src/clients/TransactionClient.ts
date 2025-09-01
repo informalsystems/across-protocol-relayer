@@ -32,6 +32,11 @@ export interface AugmentedTransaction {
   // If true, the transaction is being sent to a non Multicall contract so we can't batch it together
   // with other transactions.
   nonMulticall?: boolean;
+  // Optional deposit Id of the fill relay embedded in the tx
+  depositId?: BigNumber;
+  // Pre-calculated profitability data for gas price enhancement
+  maxGasUsd?: BigNumber; // Maximum USD amount available for gas (entire amount, not leftover)
+  gasTokenPriceUsd?: BigNumber; // Gas token price in USD for conversion
 }
 
 const { fixedPointAdjustment: fixedPoint } = sdkUtils;
@@ -56,8 +61,20 @@ export class TransactionClient {
   }
 
   protected _submit(txn: AugmentedTransaction, nonce: number | null = null): Promise<TransactionResponse> {
-    const { contract, method, args, value, gasLimit } = txn;
-    return runTransaction(this.logger, contract, method, args, value, gasLimit, nonce);
+    const { contract, method, args, value, gasLimit, depositId, maxGasUsd, gasTokenPriceUsd } = txn;
+    return runTransaction(
+      this.logger,
+      contract,
+      method,
+      args,
+      value,
+      gasLimit,
+      nonce,
+      undefined,
+      depositId,
+      maxGasUsd,
+      gasTokenPriceUsd
+    );
   }
 
   async submit(chainId: number, txns: AugmentedTransaction[]): Promise<TransactionResponse[]> {
