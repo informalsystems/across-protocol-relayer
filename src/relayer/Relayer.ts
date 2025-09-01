@@ -822,7 +822,16 @@ export class Relayer {
     tokenClient.decrementLocalBalance(destinationChainId, outputToken, outputAmount);
 
     const gasLimit = isMessageEmpty(resolveDepositMessage(deposit)) ? undefined : _gasLimit;
-    this.fillRelay(deposit, repaymentChainId, realizedLpFeePct, gasPrice, gasLimit, depositId, maxGasUsd, gasTokenPriceUsd);
+    this.fillRelay(
+      deposit,
+      repaymentChainId,
+      realizedLpFeePct,
+      gasPrice,
+      gasLimit,
+      depositId,
+      maxGasUsd,
+      gasTokenPriceUsd
+    );
   }
 
   /**
@@ -1113,7 +1122,7 @@ export class Relayer {
         mrkdwn: formatSlowFillRequestMarkdown(),
         depositId: depositId,
         maxGasUsd: undefined, // Not applicable for slow fill requests
-        gasTokenPriceUsd: undefined // Not applicable for slow fill requests
+        gasTokenPriceUsd: undefined, // Not applicable for slow fill requests
       });
     } else {
       assert(isSVMSpokePoolClient(spokePoolClient));
@@ -1221,7 +1230,7 @@ export class Relayer {
         mrkdwn,
         depositId,
         maxGasUsd,
-        gasTokenPriceUsd
+        gasTokenPriceUsd,
       });
     } else {
       assert(isSVMSpokePoolClient(spokePoolClient));
@@ -1385,7 +1394,8 @@ export class Relayer {
     // @dev The following internal function should be the only one used to set `preferredChain` above.
     const getProfitabilityDataForPreferredChainIndex = (preferredChainIndex: number): RepaymentChainProfitability => {
       const lpFeePct = lpFeePcts[preferredChainIndex];
-      const { gasLimit, gasCost, relayerFeePct, gasPrice, maxGasUsd, gasTokenPriceUsd } = repaymentChainProfitabilities[preferredChainIndex];
+      const { gasLimit, gasCost, relayerFeePct, gasPrice, maxGasUsd, gasTokenPriceUsd } =
+        repaymentChainProfitabilities[preferredChainIndex];
       return {
         gasLimit,
         gasCost,

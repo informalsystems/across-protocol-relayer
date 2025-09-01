@@ -124,7 +124,6 @@ export async function runTransaction(
       Number(process.env[`MAX_FEE_PER_GAS_SCALER_${chainId}`] || process.env.MAX_FEE_PER_GAS_SCALER) ||
       DEFAULT_GAS_FEE_SCALERS[chainId]?.maxFeePerGasScaler;
 
-
     let gas = await getGasPrice(
       provider,
       priorityFeeScaler,
@@ -175,7 +174,7 @@ export async function runTransaction(
     // TX config has gas (from gasPrice function), value (how much eth to send) and an optional gasLimit. The reduce
     // operation below deletes any null/undefined elements from this object. If gasLimit or nonce are not specified,
     // ethers will determine the correct values to use.
-    let txConfig: any = Object.entries({ ...gas, value, nonce, gasLimit }).reduce(
+    const txConfig: any = Object.entries({ ...gas, value, nonce, gasLimit }).reduce(
       (a, [k, v]) => (v ? ((a[k] = v), a) : a),
       {}
     );
@@ -205,7 +204,19 @@ export async function runTransaction(
         retriesRemaining,
       });
 
-      return await runTransaction(logger, contract, method, args, value, gasLimit, null, retriesRemaining, depositId, maxGasUsd, gasTokenPriceUsd);
+      return await runTransaction(
+        logger,
+        contract,
+        method,
+        args,
+        value,
+        gasLimit,
+        null,
+        retriesRemaining,
+        depositId,
+        maxGasUsd,
+        gasTokenPriceUsd
+      );
     } else {
       // Empirically we have observed that Ethers can produce nested errors, so we try to recurse down them
       // and log them as clearly as possible. For example:
@@ -307,7 +318,6 @@ export async function getGasPrice(
     unsignedTx: transactionObject,
   })) as EvmGasPriceEstimate;
 
-
   // Log the original oracle gas prices
   logger.debug({
     at: "TxUtil#getGasPrice",
@@ -322,7 +332,6 @@ export async function getGasPrice(
     maxFeeScaler: maxFeePerGasScaler,
     priorityScaler: priorityScaler,
   });
-
 
   // Implement the new enhanced gas pricing approach:
   // 1. maxGasUsd is the entire amount available for gas
@@ -364,7 +373,9 @@ export async function getGasPrice(
       const finalMaxPriorityFee = enhancedGasPrice.sub(estimatedBaseFee);
 
       // Ensure priority fee is not negative
-      const enhancedMaxPriorityFee = finalMaxPriorityFee.gt(bnZero) ? finalMaxPriorityFee : feeData.maxPriorityFeePerGas;
+      const enhancedMaxPriorityFee = finalMaxPriorityFee.gt(bnZero)
+        ? finalMaxPriorityFee
+        : feeData.maxPriorityFeePerGas;
 
       logger.debug({
         at: "TxUtil#getGasPrice",
@@ -391,7 +402,7 @@ export async function getGasPrice(
   } else {
     logger.debug({
       at: "TxUtil#getGasPrice",
-      message: "Gas enhancement disabled; using oracle prices"
+      message: "Gas enhancement disabled; using oracle prices",
     });
   }
 
@@ -441,13 +452,13 @@ export async function willSucceed(transaction: AugmentedTransaction): Promise<Tr
 
 export function getTarget(targetAddress: string):
   | {
-    chainId: number;
-    contractName: string;
-    targetAddress: string;
-  }
+      chainId: number;
+      contractName: string;
+      targetAddress: string;
+    }
   | {
-    targetAddress: string;
-  } {
+      targetAddress: string;
+    } {
   try {
     return { targetAddress, ...getContractInfoFromAddress(targetAddress) };
   } catch (error) {
