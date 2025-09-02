@@ -14,6 +14,7 @@ import { CONTRACT_ADDRESSES } from "../../common";
 import { processEvent } from "../utils";
 import { BridgeEvents, BridgeTransactionDetails } from "./BaseBridgeAdapter";
 import { ZKStackBridge } from "./ZKStackBridge";
+import winston from "winston";
 
 /* For both the canonical bridge (this bridge) and the ZkStackWethBridge
  * bridge, we need to assume that the l1 and l2 signers contain
@@ -29,9 +30,10 @@ export class ZKStackUSDCBridge extends ZKStackBridge {
     hubChainId: number,
     l1Signer: Signer,
     l2SignerOrProvider: Signer | Provider,
-    l1Token: EvmAddress
+    l1Token: EvmAddress,
+    logger: winston.Logger
   ) {
-    super(l2chainId, hubChainId, l1Signer, l2SignerOrProvider, l1Token);
+    super(l2chainId, hubChainId, l1Signer, l2SignerOrProvider, l1Token, logger);
     const { address: l1Bridge, abi: l1ABI } = CONTRACT_ADDRESSES[hubChainId][`zkStackUSDCBridge_${l2chainId}`];
     this.usdcBridge = new Contract(l1Bridge, l1ABI, l1Signer);
 
@@ -59,7 +61,7 @@ export class ZKStackUSDCBridge extends ZKStackBridge {
         0,
         this.l2GasLimit,
         this.gasPerPubdataLimit,
-        toAddress.toAddress(),
+        toAddress.toNative(),
         this.usdcBridge.address,
         0,
         secondBridgeCalldata,
@@ -82,7 +84,7 @@ export class ZKStackUSDCBridge extends ZKStackBridge {
     const processedEvents = events
       .filter(
         ({ args }) =>
-          compareAddressesSimple(args.to, to.toAddress()) && compareAddressesSimple(args.l1Token, l1Token.toAddress())
+          compareAddressesSimple(args.to, to.toNative()) && compareAddressesSimple(args.l1Token, l1Token.toNative())
       )
       .map((e) => processEvent(e, "amount"));
 
@@ -99,7 +101,7 @@ export class ZKStackUSDCBridge extends ZKStackBridge {
   ): Promise<BridgeEvents> {
     const l2Token = this.resolveL2TokenAddress(l1Token);
     const l2Bridge = this.getL2Bridge();
-    const filter = l2Bridge.filters.FinalizeDeposit(null, to.toAddress(), l2Token);
+    const filter = l2Bridge.filters.FinalizeDeposit(null, to.toNative(), l2Token);
     const events = await paginatedEventQuery(l2Bridge, filter, eventConfig);
 
     return {

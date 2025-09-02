@@ -6,15 +6,13 @@ import { CONTRACT_ADDRESSES } from "../../common";
 import {
   Contract,
   Signer,
-  getBlockForTimestamp,
-  getCurrentTime,
-  getRedisCache,
   Multicall2Call,
   winston,
   convertFromWei,
   getTokenInfo,
   assert,
   isEVMSpokePoolClient,
+  EvmAddress,
 } from "../../utils";
 import { FinalizerPromise, CrossChainMessage } from "../types";
 
@@ -176,7 +174,7 @@ function populateClaimWithdrawal(
   l2ChainId: number,
   hubPoolClient: HubPoolClient
 ): CrossChainMessage {
-  const l1Token = getTokenInfo(claim.l1Token, hubPoolClient.chainId);
+  const l1Token = getTokenInfo(EvmAddress.from(claim.l1Token), hubPoolClient.chainId);
   return {
     originationChainId: l2ChainId,
     l1TokenSymbol: l1Token.symbol,

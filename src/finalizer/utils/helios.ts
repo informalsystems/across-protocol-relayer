@@ -10,6 +10,7 @@ import {
   groupObjectCountsByProp,
   isEVMSpokePoolClient,
   assert,
+  Address,
 } from "../../utils";
 import { spreadEventWithBlockNumber } from "../../utils/EventUtils";
 import { FinalizerPromise, CrossChainMessage } from "../types";
@@ -62,7 +63,7 @@ export async function heliosL1toL2Finalizer(
   l2SpokePoolClient: SpokePoolClient,
   l1SpokePoolClient: SpokePoolClient,
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  _senderAddresses: string[]
+  _senderAddresses: Address[]
 ): Promise<FinalizerPromise> {
   assert(
     isEVMSpokePoolClient(l2SpokePoolClient) && isEVMSpokePoolClient(l1SpokePoolClient),
@@ -249,8 +250,8 @@ async function shouldGenerateKeepAliveAction(
     }
   }
 
-  const l2BlockFinder = await getBlockFinder(l2ChainId);
-  const l2Block24hAgo = await getBlockForTimestamp(l2ChainId, timestamp24hAgo, l2BlockFinder);
+  const l2BlockFinder = await getBlockFinder(logger, l2ChainId);
+  const l2Block24hAgo = await getBlockForTimestamp(logger, l2ChainId, timestamp24hAgo, l2BlockFinder);
 
   if (latestHeadUpdateBlockNumber < l2Block24hAgo) {
     logger.info({
@@ -415,7 +416,7 @@ async function getRelevantL1Events(
   const hubPoolStoreContract = getHubPoolStoreContract(l1ChainId, l1Provider);
 
   /**
-   * @dev We artificially shorten the lookback time peiod for L1 events by a factor of 2. We want to avoid race conditions where
+   * @dev We artificially shorten the lookback time period for L1 events by a factor of 2. We want to avoid race conditions where
    * we see an old event on L1, but not look back far enough on L2 to see that the event has been executed successfully.
    */
   const toBlock = l1SpokePoolClient.latestHeightSearched;

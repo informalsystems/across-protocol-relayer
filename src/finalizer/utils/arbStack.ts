@@ -27,6 +27,8 @@ import {
   getTokenInfo,
   assert,
   isEVMSpokePoolClient,
+  EvmAddress,
+  Address,
 } from "../../utils";
 import { TokensBridged } from "../../interfaces";
 import { HubPoolClient, SpokePoolClient } from "../../clients";
@@ -43,7 +45,7 @@ type PartialArbitrumNetwork = Omit<ArbitrumNetwork, "confirmPeriodBlocks"> & {
   registered: boolean;
 };
 // These network configs are defined in the Arbitrum SDK, and we need to register them in the SDK's memory.
-// We should export this out of a common file but we don't use this SDK elsewhere currentlyl.
+// We should export this out of a common file but we don't use this SDK elsewhere currently.
 const ARB_ORBIT_NETWORK_CONFIGS: PartialArbitrumNetwork[] = [
   {
     // Addresses are available here:
@@ -81,9 +83,11 @@ export async function arbStackFinalizer(
   hubPoolClient: HubPoolClient,
   spokePoolClient: SpokePoolClient,
   _l1SpokePoolClient: SpokePoolClient,
-  recipientAddresses: string[]
+  _recipientAddresses: Address[]
 ): Promise<FinalizerPromise> {
   assert(isEVMSpokePoolClient(spokePoolClient));
+  // Recipient addresses are just used to query events.
+  const recipientAddresses = _recipientAddresses.map((address) => address.toEvmAddress());
   LATEST_MAINNET_BLOCK = hubPoolClient.latestHeightSearched;
   const hubPoolProvider = await getProvider(hubPoolClient.chainId, logger);
   MAINNET_BLOCK_TIME = (await arch.evm.averageBlockTime(hubPoolProvider)).average;
@@ -108,6 +112,7 @@ export async function arbStackFinalizer(
   // Arbitrum orbit takes 7 days to finalize withdrawals, so don't look up events younger than that.
   const redis = await getRedisCache(logger);
   const latestBlockToFinalize = await getBlockForTimestamp(
+    logger,
     chainId,
     getCurrentTime() - getArbitrumOrbitFinalizationTime(chainId),
     undefined,
@@ -181,7 +186,7 @@ export async function arbStackFinalizer(
       return {
         ...e,
         amount: e.args._amount,
-        l2TokenAddress: l2Token,
+        l2TokenAddress: EvmAddress.from(l2Token),
       };
     }),
     ...withdrawalNativeEvents.map((e) => {
@@ -190,7 +195,7 @@ export async function arbStackFinalizer(
       return {
         ...e,
         amount: e.args.callvalue,
-        l2TokenAddress: l2Token,
+        l2TokenAddress: EvmAddress.from(l2Token),
       };
     }),
   ];

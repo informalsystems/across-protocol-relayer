@@ -14,7 +14,6 @@ import {
   sinon,
 } from "../utils";
 import * as clients from "../../src/clients";
-import { PriceClient, acrossApi, coingecko, defiLlama } from "../../src/utils";
 import {
   amountToLp,
   destinationChainId as defaultDestinationChainId,
@@ -25,7 +24,7 @@ import {
 } from "../constants";
 
 import { Dataworker } from "../../src/dataworker/Dataworker"; // Tested
-import { BundleDataClient, TokenClient } from "../../src/clients";
+import { BundleDataClient } from "../../src/clients";
 import { DataworkerConfig } from "../../src/dataworker/DataworkerConfig";
 import { DataworkerClients } from "../../src/dataworker/DataworkerClientHelper";
 import { MockConfigStoreClient, MockedMultiCallerClient, SimpleMockHubPoolClient } from "../mocks";
@@ -65,7 +64,8 @@ export async function setupDataworker(
   defaultEndBlockBuffer: number,
   destinationChainId = defaultDestinationChainId,
   originChainId = defaultOriginChainId,
-  lookbackForAllChains?: number
+  lookbackForAllChains?: number,
+  awaitChallengePeriod?: boolean
 ): Promise<{
   hubPool: Contract;
   spokePool_1: Contract;
@@ -89,7 +89,6 @@ export async function setupDataworker(
   spyLogger: winston.Logger;
   spy: sinon.SinonSpy;
   multiCallerClient: clients.MultiCallerClient;
-  priceClient: PriceClient;
   owner: SignerWithAddress;
   depositor: SignerWithAddress;
   relayer: SignerWithAddress;
@@ -193,8 +192,6 @@ export async function setupDataworker(
       spokePoolDeploymentBlocks
     );
 
-  const tokenClient = new TokenClient(spyLogger, relayer.address, {}, hubPoolClient);
-
   // This client dictionary can be conveniently passed in root builder functions that expect mapping of clients to
   // load events from. Dataworker needs a client mapped to every chain ID set in testChainIdList.
   const spokePoolClients = {
@@ -204,12 +201,6 @@ export async function setupDataworker(
     [hubPoolChainId]: spokePoolClient_4,
   };
 
-  // @todo: These PriceClient price adapters are potential candidates for being mocked with fake prices.
-  const priceClient = new PriceClient(spyLogger, [
-    new acrossApi.PriceFeed(),
-    new coingecko.PriceFeed({ apiKey: process.env.COINGECKO_PRO_API_KEY }),
-    new defiLlama.PriceFeed(),
-  ]);
   const bundleDataClient = new BundleDataClient(
     spyLogger,
     {
@@ -224,15 +215,17 @@ export async function setupDataworker(
 
   const dataworkerClients: DataworkerClients = {
     bundleDataClient,
-    tokenClient,
     hubPoolClient,
     multiCallerClient,
     configStoreClient: configStoreClient as unknown as sdkClients.AcrossConfigStoreClient,
-    priceClient,
   };
   const dataworkerInstance = new Dataworker(
     spyLogger,
-    {} as DataworkerConfig,
+    {
+      awaitChallengePeriod: awaitChallengePeriod ?? false,
+      executorIgnoreChains: [],
+      sendingTransactionsEnabled: true,
+    } as unknown as DataworkerConfig,
     dataworkerClients,
     testChainIdList,
     maxRefundPerRelayerRefundLeaf,
@@ -283,7 +276,6 @@ export async function setupDataworker(
     spyLogger,
     spy,
     multiCallerClient,
-    priceClient,
     owner,
     depositor,
     relayer,
@@ -326,7 +318,6 @@ export async function setupFastDataworker(
   spyLogger: winston.Logger;
   spy: sinon.SinonSpy;
   multiCallerClient: clients.MultiCallerClient;
-  priceClient: PriceClient;
   owner: SignerWithAddress;
   depositor: SignerWithAddress;
   relayer: SignerWithAddress;

@@ -9,6 +9,7 @@ import {
   bnZero,
   TOKEN_SYMBOLS_MAP,
   EvmAddress,
+  winston,
 } from "../../utils";
 import { CONTRACT_ADDRESSES } from "../../common";
 import { Log } from "../../interfaces";
@@ -21,11 +22,19 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
   protected atomicDepositor: Contract;
   protected l2Weth: Contract;
   protected l1Weth: EvmAddress;
-  private readonly hubPoolAddress: string;
 
   private readonly l2Gas = 200000;
 
-  constructor(l2chainId: number, hubChainId: number, l1Signer: Signer, l2SignerOrProvider: Signer | Provider) {
+  constructor(
+    l2chainId: number,
+    hubChainId: number,
+    l1Signer: Signer,
+    l2SignerOrProvider: Signer | Provider,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _l1Token: EvmAddress,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _logger: winston.Logger
+  ) {
     super(
       l2chainId,
       hubChainId,
@@ -45,7 +54,6 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
 
     this.l2Weth = new Contract(TOKEN_SYMBOLS_MAP.WETH.addresses[l2chainId], WETH_ABI, l2SignerOrProvider);
     this.l1Weth = EvmAddress.from(TOKEN_SYMBOLS_MAP.WETH.addresses[this.hubChainId]);
-    this.hubPoolAddress = CONTRACT_ADDRESSES[this.hubChainId]?.hubPool?.address;
   }
 
   async constructL1ToL2Txn(
@@ -55,7 +63,7 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
     amount: BigNumber
   ): Promise<BridgeTransactionDetails> {
     const bridgeCalldata = this.getL1Bridge().interface.encodeFunctionData("depositETHTo", [
-      toAddress.toAddress(),
+      toAddress.toNative(),
       this.l2Gas,
       "0x",
     ]);
@@ -88,21 +96,21 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
 
     // Since we can only index on the `fromAddress` for the ETHDepositInitiated event, we can't support
     // monitoring the spoke pool address
-    if (isL2ChainContract || (isContract && fromAddress.toAddress() !== this.hubPoolAddress)) {
+    if (isL2ChainContract || (isContract && !fromAddress.eq(this.hubPoolAddress))) {
       return this.convertEventListToBridgeEvents([]);
     }
 
     const events = await paginatedEventQuery(
       this.getL1Bridge(),
       this.getL1Bridge().filters.ETHDepositInitiated(
-        isContract ? fromAddress.toAddress() : this.atomicDepositor.address
+        isContract ? fromAddress.toNative() : this.atomicDepositor.address
       ),
       eventConfig
     );
     // If EOA sent the ETH via the AtomicDepositor, then remove any events where the
     // toAddress is not the EOA so we don't get confused with other users using the AtomicDepositor
     if (!isContract) {
-      return this.convertEventListToBridgeEvents(events.filter((event) => event.args._to === fromAddress.toAddress()));
+      return this.convertEventListToBridgeEvents(events.filter((event) => event.args._to === fromAddress.toNative()));
     }
     return this.convertEventListToBridgeEvents(events);
   }
@@ -137,7 +145,7 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
       )
         // If EOA sent the ETH via the AtomicDepositor, then remove any events where the
         // toAddress is not the EOA so we don't get confused with other users using the AtomicDepositor
-        .filter((event) => event.args._to === toAddress.toAddress());
+        .filter((event) => event.args._to === toAddress.toNative());
 
       // We only care about WETH finalization events initiated by the relayer running this rebalancer logic, so only
       // filter on Deposit events sent from the provided signer. We can't simply filter on `fromAddress` because
@@ -150,14 +158,14 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
     } else {
       // Since we can only index on the `fromAddress` for the DepositFinalized event, we can't support
       // monitoring the spoke pool address
-      if (fromAddress.toAddress() !== this.hubPoolAddress) {
+      if (!fromAddress.eq(this.hubPoolAddress)) {
         return this.convertEventListToBridgeEvents([]);
       }
 
       return this.convertEventListToBridgeEvents(
         await paginatedEventQuery(
           this.getL2Bridge(),
-          this.getL2Bridge().filters.DepositFinalized(ZERO_ADDRESS, undefined, fromAddress.toAddress()),
+          this.getL2Bridge().filters.DepositFinalized(ZERO_ADDRESS, undefined, fromAddress.toNative()),
           eventConfig
         )
       );
@@ -165,10 +173,10 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
   }
 
   async isHubChainContract(address: EvmAddress): Promise<boolean> {
-    return utils.isContractDeployedToAddress(address.toAddress(), this.getL1Bridge().provider);
+    return utils.isContractDeployedToAddress(address.toNative(), this.getL1Bridge().provider);
   }
   async isL2ChainContract(address: EvmAddress): Promise<boolean> {
-    return utils.isContractDeployedToAddress(address.toAddress(), this.getL2Bridge().provider);
+    return utils.isContractDeployedToAddress(address.toNative(), this.getL2Bridge().provider);
   }
 
   private queryL2WrapEthEvents(
@@ -176,6 +184,6 @@ export class OpStackWethBridge extends BaseBridgeAdapter {
     eventConfig: EventSearchConfig,
     l2Weth = this.l2Weth
   ): Promise<Log[]> {
-    return paginatedEventQuery(l2Weth, l2Weth.filters.Deposit(fromAddress.toAddress()), eventConfig);
+    return paginatedEventQuery(l2Weth, l2Weth.filters.Deposit(fromAddress.toNative()), eventConfig);
   }
 }

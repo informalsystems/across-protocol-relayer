@@ -18,7 +18,17 @@ import {
   stringifyThrownValue,
   CHAIN_IDs,
   EvmGasPriceEstimate,
+  SVMProvider,
+  parseUnits,
 } from "../utils";
+import {
+  CompilableTransactionMessage,
+  KeyPairSigner,
+  getBase64EncodedWireTransaction,
+  signTransactionMessageWithSigners,
+  type Blockhash,
+} from "@solana/kit";
+
 dotenv.config();
 
 // Define chains that require legacy (type 0) transactions
@@ -29,6 +39,11 @@ export type TransactionSimulationResult = {
   succeed: boolean;
   reason?: string;
   data?: any;
+};
+
+export type LatestBlockhash = {
+  blockhash: Blockhash;
+  lastValidBlockHeight: bigint;
 };
 
 const { isError, isEthersError } = typeguards;
@@ -50,6 +65,18 @@ const txnRetryable = (error?: unknown): boolean => {
   return expectedRpcErrorMessages.has((error as Error)?.message);
 };
 
+const isFillRelayError = (error: unknown): boolean => {
+  const fillRelaySelector = "0xdeff4b24"; // keccak256("fillRelay()")[:4]
+  const multicallSelector = "0xac9650d8"; // keccak256("multicall()")[:4]
+
+  const errorStack = (error as Error).stack;
+  const isFillRelayError = errorStack?.includes(fillRelaySelector);
+  const isMulticallError = errorStack?.includes(multicallSelector);
+  const isFillRelayInMulticallError = isMulticallError && errorStack?.includes(fillRelaySelector.replace("0x", ""));
+
+  return isFillRelayError || isFillRelayInMulticallError;
+};
+
 export function getNetworkError(err: unknown): string {
   return isEthersError(err) ? err.reason : isError(err) ? err.message : "unknown error";
 }
@@ -60,6 +87,8 @@ export async function getMultisender(chainId: number, baseSigner: Signer): Promi
 
 // Note that this function will throw if the call to the contract on method for given args reverts. Implementers
 // of this method should be considerate of this and catch the response to deal with the error accordingly.
+// @dev: If the method value is an empty string (e.g. ""), then this function
+// will submit a raw transaction to the contract address.
 export async function runTransaction(
   logger: winston.Logger,
   contract: Contract,
@@ -78,6 +107,8 @@ export async function runTransaction(
     nonceReset[chainId] = true;
   }
 
+  const sendRawTransaction = method === "";
+
   try {
     const priorityFeeScaler =
       Number(process.env[`PRIORITY_FEE_SCALER_${chainId}`] || process.env.PRIORITY_FEE_SCALER) ||
@@ -90,12 +121,24 @@ export async function runTransaction(
       provider,
       priorityFeeScaler,
       maxFeePerGasScaler,
-      await contract.populateTransaction[method](...(args as Array<unknown>), { value })
+      sendRawTransaction
+        ? undefined
+        : await contract.populateTransaction[method](...(args as Array<unknown>), { value })
     );
+
+    const flooredPriorityFeePerGas = parseUnits(process.env[`MIN_PRIORITY_FEE_PER_GAS_${chainId}`] || "0", 9);
 
     // Check if the chain requires legacy transactions
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
-      gas = { gasPrice: gas.maxFeePerGas };
+      gas = { gasPrice: gas.maxFeePerGas.lt(flooredPriorityFeePerGas) ? flooredPriorityFeePerGas : gas.maxFeePerGas };
+    } else {
+      // If the priority fee was overridden by the min/floor value, the base fee must be scaled up as well.
+      const maxPriorityFeePerGas = sdkUtils.bnMax(gas.maxPriorityFeePerGas, flooredPriorityFeePerGas);
+      const baseFeeDelta = maxPriorityFeePerGas.sub(gas.maxPriorityFeePerGas);
+      gas = {
+        maxFeePerGas: gas.maxFeePerGas.add(baseFeeDelta),
+        maxPriorityFeePerGas,
+      };
     }
 
     logger.debug({
@@ -107,7 +150,9 @@ export async function runTransaction(
       value,
       nonce,
       gas,
+      flooredPriorityFeePerGas,
       gasLimit,
+      sendRawTxn: sendRawTransaction,
     });
     // TX config has gas (from gasPrice function), value (how much eth to send) and an optional gasLimit. The reduce
     // operation below deletes any null/undefined elements from this object. If gasLimit or nonce are not specified,
@@ -116,10 +161,14 @@ export async function runTransaction(
       (a, [k, v]) => (v ? ((a[k] = v), a) : a),
       {}
     );
-    return await contract[method](...(args as Array<unknown>), txConfig);
+    if (sendRawTransaction) {
+      return await (await contract.signer).sendTransaction({ to: contract.address, value, ...gas });
+    } else {
+      return await contract[method](...(args as Array<unknown>), txConfig);
+    }
   } catch (error) {
     if (retriesRemaining > 0 && txnRetryable(error)) {
-      // If error is due to a nonce collision or gas underpricement then re-submit to fetch latest params.
+      // If error is due to a nonce collision or gas underpricing then re-submit to fetch latest params.
       retriesRemaining -= 1;
       logger.debug({
         at: "TxUtil#runTransaction",
@@ -144,6 +193,7 @@ export async function runTransaction(
         args,
         value,
         nonce,
+        sendRawTxn: sendRawTransaction,
         notificationPath: "across-error",
       };
       if (isEthersError(error)) {
@@ -158,14 +208,48 @@ export async function runTransaction(
           errorReasons: ethersErrors.map((e, i) => `\t ${i}: ${e.reason}`).join("\n"),
         });
       } else {
-        logger[txnRetryable(error) ? "warn" : "error"]({
+        const isWarning = txnRetryable(error) || isFillRelayError(error);
+        logger[isWarning ? "warn" : "error"]({
           ...commonFields,
+          notificationPath: isWarning ? "across-warn" : "across-error",
           error: stringifyThrownValue(error),
         });
       }
       throw error;
     }
   }
+}
+
+export async function sendAndConfirmSolanaTransaction(
+  unsignedTransaction: CompilableTransactionMessage,
+  signer: KeyPairSigner,
+  provider: SVMProvider,
+  cycles = 25,
+  pollingDelay = 600 // 1.5 slots on Solana.
+): Promise<string> {
+  const delay = (ms: number) => {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  };
+  const signedTx = await signTransactionMessageWithSigners(unsignedTransaction);
+  const serializedTx = getBase64EncodedWireTransaction(signedTx);
+  const txSignature = await provider
+    .sendTransaction(serializedTx, { preflightCommitment: "confirmed", skipPreflight: false, encoding: "base64" })
+    .send();
+  let confirmed = false;
+  let _cycles = 0;
+  while (!confirmed && _cycles < cycles) {
+    const txStatus = await provider.getSignatureStatuses([txSignature]).send();
+    // Index 0 since we are only sending a single transaction in this method.
+    confirmed =
+      txStatus?.value?.[0]?.confirmationStatus === "confirmed" ||
+      txStatus?.value?.[0]?.confirmationStatus === "finalized";
+    // If the transaction wasn't confirmed, wait `pollingInterval` and retry.
+    if (!confirmed) {
+      await delay(pollingDelay);
+      _cycles++;
+    }
+  }
+  return txSignature;
 }
 
 export async function getGasPrice(

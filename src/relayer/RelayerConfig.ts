@@ -4,6 +4,7 @@ import { typeguards } from "@across-protocol/sdk";
 import {
   BigNumber,
   bnUint256Max,
+  chainIsSvm,
   CHAIN_IDs,
   dedupArray,
   toBNWei,
@@ -12,10 +13,12 @@ import {
   isDefined,
   readFileSync,
   toBN,
-  replaceAddressCase,
   ethers,
   TESTNET_CHAIN_IDs,
   TOKEN_SYMBOLS_MAP,
+  Address,
+  toAddressType,
+  EvmAddress,
 } from "../utils";
 import { CommonConfig, ProcessEnv } from "../common";
 import * as Constants from "../common/Constants";
@@ -32,10 +35,9 @@ export class RelayerConfig extends CommonConfig {
   readonly inventoryConfig: InventoryConfig;
   readonly debugProfitability: boolean;
   readonly sendingRelaysEnabled: boolean;
-  readonly sendingRebalancesEnabled: boolean;
-  readonly sendingMessageRelaysEnabled: boolean;
+  readonly sendingMessageRelaysEnabled: { [chainId: number]: boolean } = {};
   readonly sendingSlowRelaysEnabled: boolean;
-  readonly relayerTokens: string[];
+  readonly relayerTokens: EvmAddress[];
   readonly relayerOriginChains: number[] = [];
   readonly relayerDestinationChains: number[] = [];
   readonly relayerGasPadding: BigNumber;
@@ -45,7 +47,7 @@ export class RelayerConfig extends CommonConfig {
   readonly minFillTime: { [chainId: number]: number } = {};
   readonly acceptInvalidFills: boolean;
   // List of depositors we only want to send slow fills for.
-  readonly slowDepositors: string[];
+  readonly slowDepositors: Address[];
   // Following distances in blocks to guarantee finality on each chain.
   readonly minDepositConfirmations: {
     [chainId: number]: DepositConfirmationConfig[];
@@ -80,8 +82,6 @@ export class RelayerConfig extends CommonConfig {
       RELAYER_INVENTORY_CONFIG,
       RELAYER_TOKENS,
       SEND_RELAYS,
-      SEND_REBALANCES,
-      SEND_MESSAGE_RELAYS,
       SEND_SLOW_RELAYS,
       MIN_RELAYER_FEE_PCT,
       ACCEPT_INVALID_FILLS,
@@ -102,8 +102,15 @@ export class RelayerConfig extends CommonConfig {
     this.relayerDestinationChains = JSON.parse(RELAYER_DESTINATION_CHAINS ?? "[]");
 
     // Empty means all tokens.
-    this.relayerTokens = JSON.parse(RELAYER_TOKENS ?? "[]").map((token) => ethers.utils.getAddress(token));
-    this.slowDepositors = JSON.parse(SLOW_DEPOSITORS ?? "[]").map((depositor) => ethers.utils.getAddress(depositor));
+    this.relayerTokens = JSON.parse(RELAYER_TOKENS ?? "[]").map((token) =>
+      toAddressType(ethers.utils.getAddress(token), CHAIN_IDs.MAINNET)
+    );
+
+    // SLOW_DEPOSITORS can exist on any network, so their origin network must be inferred based on the structure of the address.
+    this.slowDepositors = JSON.parse(SLOW_DEPOSITORS ?? "[]").map((depositor) => {
+      const chainId = ethers.utils.isHexString(depositor) ? CHAIN_IDs.MAINNET : CHAIN_IDs.SOLANA;
+      return toAddressType(depositor, chainId);
+    });
 
     this.minRelayerFeePct = toBNWei(MIN_RELAYER_FEE_PCT || Constants.RELAYER_MIN_FEE_PCT);
 
@@ -125,8 +132,6 @@ export class RelayerConfig extends CommonConfig {
     }
 
     if (Object.keys(this.inventoryConfig).length > 0) {
-      this.inventoryConfig = replaceAddressCase(this.inventoryConfig); // Cast any non-address case addresses.
-
       const { inventoryConfig } = this;
 
       // Default to 1 Eth on the target chains and wrapping the rest to WETH.
@@ -226,7 +231,9 @@ export class RelayerConfig extends CommonConfig {
         assert(effectiveL1Token !== undefined, `No token identified for ${l1Token}`);
 
         // Filter inventory configuration by supported tokens, if specified.
-        const known = this.relayerTokens.includes(effectiveL1Token) || this.relayerTokens.length === 0;
+        const known =
+          this.relayerTokens.map((token) => token.toNative()).includes(effectiveL1Token) ||
+          this.relayerTokens.length === 0;
         if (!known) {
           delete rawTokenConfigs[l1Token];
           return;
@@ -265,8 +272,6 @@ export class RelayerConfig extends CommonConfig {
       RELAYER_GAS_MESSAGE_MULTIPLIER || Constants.DEFAULT_RELAYER_GAS_MESSAGE_MULTIPLIER
     );
     this.sendingRelaysEnabled = SEND_RELAYS === "true";
-    this.sendingRebalancesEnabled = SEND_REBALANCES === "true";
-    this.sendingMessageRelaysEnabled = SEND_MESSAGE_RELAYS === "true";
     this.sendingSlowRelaysEnabled = SEND_SLOW_RELAYS === "true";
     this.acceptInvalidFills = ACCEPT_INVALID_FILLS === "true";
 
@@ -356,12 +361,20 @@ export class RelayerConfig extends CommonConfig {
       });
     }
 
-    const { RELAYER_SPOKEPOOL_LISTENER_PATH = Constants.RELAYER_DEFAULT_SPOKEPOOL_LISTENER } = process.env;
-
     chainIds.forEach((chainId) => {
+      const defaultPath = chainIsSvm(chainId)
+        ? Constants.RELAYER_SPOKEPOOL_LISTENER_SVM
+        : Constants.RELAYER_SPOKEPOOL_LISTENER_EVM;
+      const { RELAYER_SPOKEPOOL_LISTENER_PATH = defaultPath } = process.env;
       minFillTime[chainId] = Number(process.env[`RELAYER_MIN_FILL_TIME_${chainId}`] ?? 0);
       listenerPath[chainId] =
         process.env[`RELAYER_SPOKEPOOL_LISTENER_PATH_${chainId}`] ?? RELAYER_SPOKEPOOL_LISTENER_PATH;
+
+      const sendMessageRelaysChain = process.env[`SEND_MESSAGE_RELAYS_${chainId}`];
+      const sendMessageRelays = isDefined(sendMessageRelaysChain)
+        ? sendMessageRelaysChain === "true"
+        : process.env["SEND_MESSAGE_RELAYS"] === "true";
+      this.sendingMessageRelaysEnabled[chainId] = sendMessageRelays;
     });
 
     // Only validate config for chains that the relayer cares about.

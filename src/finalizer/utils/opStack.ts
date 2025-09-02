@@ -5,7 +5,6 @@ import * as viem from "viem";
 import * as viemChains from "viem/chains";
 import {
   getWithdrawals,
-  GetWithdrawalStatusReturnType,
   buildProveWithdrawal,
   getWithdrawalStatus,
   getL2Output,
@@ -40,9 +39,11 @@ import {
   bnZero,
   forEachAsync,
   getTokenInfo,
-  compareAddressesSimple,
   getCctpDomainForChainId,
   isEVMSpokePoolClient,
+  EvmAddress,
+  ZERO_ADDRESS,
+  Address,
 } from "../../utils";
 import { CONTRACT_ADDRESSES, OPSTACK_CONTRACT_OVERRIDES } from "../../common";
 import OPStackPortalL1 from "../../common/abi/OpStackPortalL1.json";
@@ -105,7 +106,7 @@ export async function opStackFinalizer(
   hubPoolClient: HubPoolClient,
   spokePoolClient: SpokePoolClient,
   _l1SpokePoolClient: SpokePoolClient,
-  senderAddresses: string[]
+  senderAddresses: Address[]
 ): Promise<FinalizerPromise> {
   assert(isEVMSpokePoolClient(spokePoolClient));
   const { chainId, latestHeightSearched: to, spokePool } = spokePoolClient;
@@ -120,16 +121,17 @@ export async function opStackFinalizer(
   // - Don't try to withdraw tokens that are not past the 7 day challenge period
   const redis = await getRedisCache(logger);
   const minimumFinalizationTime = getCurrentTime() - 7 * 3600 * 24;
-  const latestBlockToProve = await getBlockForTimestamp(chainId, minimumFinalizationTime, undefined, redis);
+  const latestBlockToProve = await getBlockForTimestamp(logger, chainId, minimumFinalizationTime, undefined, redis);
 
   // OP Stack chains have several tokens that do not go through the standard ERC20 withdrawal process (e.g. DAI
   // on Optimism, SNX on Optimism, USDC.e on Worldchain, etc) so the easiest way to query for these
   // events is to use the TokenBridged event emitted by the Across SpokePool on every withdrawal.
+  const usdc = EvmAddress.from(USDC.addresses[chainId] ?? ZERO_ADDRESS);
   const { recentTokensBridgedEvents = [], olderTokensBridgedEvents = [] } = groupBy(
     spokePoolClient.getTokensBridged().filter(
       ({ l2TokenAddress }) =>
         // CCTP USDC withdrawals should be finalized via the CCTP Finalizer.
-        !compareAddressesSimple(l2TokenAddress, USDC.addresses[chainId]) || !(getCctpDomainForChainId(chainId) > 0)
+        !l2TokenAddress.eq(usdc) || !(getCctpDomainForChainId(chainId) > 0)
     ),
     (e) => (e.blockNumber >= latestBlockToProve ? "recentTokensBridgedEvents" : "olderTokensBridgedEvents")
   );
@@ -143,21 +145,24 @@ export async function opStackFinalizer(
   // and because they are lite chains, our only way to withdraw them is to initiate a manual bridge from the
   // the lite chain to Ethereum via the canonical OVM standard bridge.
   // Filter out SpokePool as sender since we query for it previously using the TokensBridged event query.
-  const ovmFromAddresses = senderAddresses.filter((sender) => sender !== spokePool.address);
+  const ovmFromAddresses = senderAddresses
+    .map((sender) => sender.toEvmAddress())
+    .filter((sender) => sender !== spokePool.address);
   const searchConfig = { ...spokePoolClient.eventSearchConfig, to };
-  const ovmStdEvents = await getOVMStdEvents(logger, spokePool.provider, ovmFromAddresses, searchConfig);
-  const opUSDCEvents = await getOPUSDCEvents(logger, spokePool.provider, ovmFromAddresses, searchConfig);
+  const withdrawalEvents = await Promise.all([
+    getOVMStdEvents(logger, spokePool.provider, ovmFromAddresses, searchConfig),
+    getOPUSDCEvents(logger, spokePool.provider, ovmFromAddresses, searchConfig),
+  ]);
 
-  const withdrawalEvents = [...ovmStdEvents, ...opUSDCEvents];
   // If there are any found withdrawal initiated events, then add them to the list of TokenBridged events we'll
   // submit proofs and finalizations for.
-  withdrawalEvents.forEach(({ transactionHash, transactionIndex, ...event }) => {
+  withdrawalEvents.flat().forEach(({ transactionHash, transactionIndex, ...event }) => {
     const tokenBridgedEvent: TokensBridged = {
       ...event,
       amountToReturn: event.args.amount,
       chainId,
       leafId: 0,
-      l2TokenAddress: event.l2TokenAddress,
+      l2TokenAddress: EvmAddress.from(event.l2TokenAddress),
       txnRef: transactionHash,
       txnIndex: transactionIndex,
     };
@@ -246,7 +251,7 @@ async function getOVMStdEvents(
     .map((event) => {
       // If we're aware of this token, then save the event as one we can finalize.
       try {
-        getTokenInfo(event.args.localToken, chainId);
+        getTokenInfo(EvmAddress.from(event.args.localToken), chainId);
         return { ...event, l2TokenAddress: event.args.localToken };
       } catch {
         logger.debug({ at, message: `Skipping unknown ${chain} token withdrawal: ${event.args.localToken}`, event });
@@ -384,7 +389,7 @@ async function viem_multicallOptimismFinalizations(
       hash: event.txnRef as `0x${string}`,
     });
     const withdrawal = getWithdrawals(receipt)[logIndexesForMessage[i]];
-    const withdrawalStatus: GetWithdrawalStatusReturnType = await getWithdrawalStatus(publicClientL1 as viem.Client, {
+    const withdrawalStatus = await getWithdrawalStatus(publicClientL1 as viem.Client, {
       receipt,
       chain: publicClientL1.chain as viem.Chain,
       targetChain: viemOpStackTargetChainParam,
@@ -741,7 +746,7 @@ async function multicallOptimismFinalizations(
   // one WithdrawRequest with a unique requestId.
   const statusRelayed = optimismSDK.MessageStatus[optimismSDK.MessageStatus.RELAYED];
   const claimableUSDBMessages = allMessages.filter(
-    ({ event, status }) => status === statusRelayed && event.l2TokenAddress === USDB.addresses[chainId]
+    ({ event, status }) => status === statusRelayed && event.l2TokenAddress.eq(EvmAddress.from(USDB.addresses[chainId]))
   );
   if (claimableUSDBMessages.length === 0) {
     return {

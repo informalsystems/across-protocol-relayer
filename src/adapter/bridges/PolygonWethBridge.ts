@@ -9,6 +9,7 @@ import {
   ZERO_ADDRESS,
   getL2TokenAddresses,
   EvmAddress,
+  winston,
 } from "../../utils";
 import { CONTRACT_ADDRESSES } from "../../common";
 import { BridgeTransactionDetails, BaseBridgeAdapter, BridgeEvents } from "./BaseBridgeAdapter";
@@ -27,13 +28,15 @@ export class PolygonWethBridge extends BaseBridgeAdapter {
     hubChainId: number,
     l1Signer: Signer,
     l2SignerOrProvider: Signer | Provider,
-    l1Token: EvmAddress
+    l1Token: EvmAddress,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _logger: winston.Logger
   ) {
     // @dev This method fetches the *SDK's* most up-to-date values of
     // TOKEN_SYMBOLS_MAP. This constructor will therefore break if
     // either the SDK, or the constants dependency in the SDK, is not
     // up-to-date.
-    const l2TokenAddresses = getL2TokenAddresses(l1Token.toAddress(), hubChainId);
+    const l2TokenAddresses = getL2TokenAddresses(l1Token.toNative(), hubChainId);
     const { address: l1Address, abi: l1Abi } = CONTRACT_ADDRESSES[hubChainId].polygonWethBridge;
     const { address: atomicDepositorAddress, abi: atomicDepositorAbi } = CONTRACT_ADDRESSES[hubChainId].atomicDepositor;
     const { address: rootChainManagerAddress, abi: rootChainManagerAbi } =
@@ -56,7 +59,7 @@ export class PolygonWethBridge extends BaseBridgeAdapter {
     amount: BigNumber
   ): Promise<BridgeTransactionDetails> {
     const bridgeCalldata = this.rootChainManager.interface.encodeFunctionData("depositEtherFor", [
-      toAddress.toAddress(),
+      toAddress.toNative(),
     ]);
     return Promise.resolve({
       contract: this.atomicDepositor,
@@ -73,7 +76,7 @@ export class PolygonWethBridge extends BaseBridgeAdapter {
   ): Promise<BridgeEvents> {
     const events = await paginatedEventQuery(
       this.getL1Bridge(),
-      this.getL1Bridge().filters.LockedEther(undefined, toAddress.toAddress()),
+      this.getL1Bridge().filters.LockedEther(undefined, toAddress.toNative()),
       eventConfig
     );
     return {
@@ -89,7 +92,7 @@ export class PolygonWethBridge extends BaseBridgeAdapter {
   ): Promise<BridgeEvents> {
     const events = await paginatedEventQuery(
       this.getL2Bridge(),
-      this.getL2Bridge().filters.Transfer(ZERO_ADDRESS, toAddress.toAddress()),
+      this.getL2Bridge().filters.Transfer(ZERO_ADDRESS, toAddress.toNative()),
       eventConfig
     );
     return {

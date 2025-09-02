@@ -12,11 +12,18 @@ import {
   winston,
   convertFromWei,
   EventSearchConfig,
+  SvmAddress,
+  chainIsSvm,
+  Address,
+  toKitAddress,
+  getStatePda,
+  toAddressType,
+  createFormatFunction,
 } from "../../../utils";
 import {
-  AttestedCCTPDepositEvent,
+  AttestedCCTPDeposit,
   CCTPMessageStatus,
-  getAttestationsForCCTPDepositEvents,
+  getAttestedCCTPDeposits,
   getCctpMessageTransmitter,
 } from "../../../utils/CCTPUtils";
 import { FinalizerPromise, CrossChainMessage } from "../../types";
@@ -27,15 +34,21 @@ export async function cctpL2toL1Finalizer(
   hubPoolClient: HubPoolClient,
   spokePoolClient: SpokePoolClient,
   _l1SpokePoolClient: SpokePoolClient,
-  senderAddresses: string[]
+  senderAddresses: Address[]
 ): Promise<FinalizerPromise> {
   const searchConfig: EventSearchConfig = {
     from: spokePoolClient.eventSearchConfig.from,
     to: spokePoolClient.latestHeightSearched,
     maxLookBack: spokePoolClient.eventSearchConfig.maxLookBack,
   };
-  const outstandingDeposits = await getAttestationsForCCTPDepositEvents(
-    senderAddresses,
+
+  const finalizingFromSolana = chainIsSvm(spokePoolClient.chainId);
+  const augmentedSenderAddresses = finalizingFromSolana
+    ? await augmentSendersListForSolana(senderAddresses, spokePoolClient)
+    : senderAddresses;
+
+  const outstandingDeposits = await getAttestedCCTPDeposits(
+    augmentedSenderAddresses,
     spokePoolClient.chainId,
     hubPoolClient.chainId,
     spokePoolClient.chainId,
@@ -49,10 +62,23 @@ export async function cctpL2toL1Finalizer(
     outstandingDeposits,
     (message: { status: CCTPMessageStatus }) => message.status
   );
+  const pending = outstandingDeposits
+    .filter(({ status }) => status === "pending")
+    .map((deposit) => {
+      const formatter = createFormatFunction(2, 4, false, 6);
+      const recipient = toAddressType(deposit.recipient, spokePoolClient.chainId);
+      const transactionHash = deposit.log?.transactionHash;
+      return {
+        amount: formatter(deposit.amount),
+        recipient,
+        transactionHash,
+      };
+    });
   logger.debug({
     at: `Finalizer#CCTPL2ToL1Finalizer:${spokePoolClient.chainId}`,
     message: `Detected ${unprocessedMessages.length} ready to finalize messages for CCTP ${spokePoolClient.chainId} to L1`,
     statusesGrouped,
+    pending,
   });
 
   const { address, abi } = getCctpMessageTransmitter(spokePoolClient.chainId, hubPoolClient.chainId);
@@ -76,7 +102,7 @@ export async function cctpL2toL1Finalizer(
  */
 async function generateMultiCallData(
   messageTransmitter: Contract,
-  messages: Pick<AttestedCCTPDepositEvent, "attestation" | "messageBytes">[]
+  messages: Pick<AttestedCCTPDeposit, "attestation" | "messageBytes">[]
 ): Promise<Multicall2Call[]> {
   assert(messages.every((message) => isDefined(message.attestation)));
   return Promise.all(
@@ -101,7 +127,7 @@ async function generateMultiCallData(
  * @returns A list of valid withdrawals for a given list of CCTP messages.
  */
 async function generateWithdrawalData(
-  messages: Pick<AttestedCCTPDepositEvent, "amount">[],
+  messages: Pick<AttestedCCTPDeposit, "amount">[],
   originationChainId: number,
   destinationChainId: number
 ): Promise<CrossChainMessage[]> {
@@ -112,4 +138,25 @@ async function generateWithdrawalData(
     originationChainId,
     destinationChainId,
   }));
+}
+
+/**
+ * When finalizing CCTP token transfers from Solana to Ethereum, especially transfers from the SpokePool, it's not enough
+ * to have SpokePool address in the `senderAddresses`. We instead need SpokePool's `statePda` in there, because that is
+ * what gets recorded as `depositor` in the `DepositForBurn` event
+ */
+async function augmentSendersListForSolana(
+  senderAddresses: Address[],
+  spokePoolClient: SpokePoolClient
+): Promise<Address[]> {
+  const spokeAddress = spokePoolClient.spokePoolAddress;
+  // This format is taken from `src/finalizer/index.ts`
+  if (senderAddresses.some((address) => address.eq(spokeAddress))) {
+    const _statePda = await getStatePda(toKitAddress(spokeAddress));
+    // This format has to match format in CCTPUtils.ts >
+    const statePda = SvmAddress.from(_statePda.toString());
+    return [...senderAddresses, statePda];
+  } else {
+    return senderAddresses;
+  }
 }

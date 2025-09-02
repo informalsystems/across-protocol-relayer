@@ -110,7 +110,9 @@ async function listen(eventMgr: EventManager, spokePool: Contract, eventNames: s
     }
     const [blockNumber, currentTime] = [parseInt(block.number.toString()), parseInt(block.timestamp.toString())];
     const events = eventMgr.tick();
-    postEvents(blockNumber, currentTime, events);
+    if (!postEvents(blockNumber, currentTime, events)) {
+      stop = true;
+    }
   };
 
   const blockError = (error: Error, provider: string) => {
@@ -211,7 +213,7 @@ async function run(argv: string[]): Promise<void> {
     assert(Number.isInteger(Number(lookback)), `Invalid lookback (${lookback})`);
     startBlock = Math.max(
       deploymentBlock,
-      await getBlockForTimestamp(chainId, latestBlock.timestamp - lookback, blockFinder, cache)
+      await getBlockForTimestamp(logger, chainId, latestBlock.timestamp - lookback, blockFinder, cache)
     );
   } else {
     logger.debug({ at: "RelayerSpokePoolListener::run", message: `Skipping lookback on ${chain}.` });
@@ -243,7 +245,7 @@ async function run(argv: string[]): Promise<void> {
     stop = true;
   });
 
-  // Note: An event emitted between scrapeEvents() and listen(). @todo: Ensure that there is overlap and dedpulication.
+  // Note: An event emitted between scrapeEvents() and listen(). @todo: Ensure that there is overlap and deduplication.
   logger.debug({ at: "RelayerSpokePoolListener::run", message: `Scraping previous ${chain} events.`, opts });
 
   if (latestBlock.number > startBlock) {

@@ -12,6 +12,7 @@ import {
   compareAddressesSimple,
   TOKEN_SYMBOLS_MAP,
   EvmAddress,
+  winston,
 } from "../../utils";
 import { CONTRACT_ADDRESSES, SCROLL_CUSTOM_GATEWAY } from "../../common";
 import { BaseBridgeAdapter, BridgeTransactionDetails, BridgeEvents } from "./BaseBridgeAdapter";
@@ -29,18 +30,19 @@ export class ScrollERC20Bridge extends BaseBridgeAdapter {
   protected readonly scrollGasPriceOracle: Contract;
 
   protected readonly scrollGatewayRouter;
-  protected readonly hubPoolAddress;
   constructor(
     l2chainId: number,
     hubChainId: number,
     l1Signer: Signer,
     l2SignerOrProvider: Signer | Provider,
-    l1Token: EvmAddress
+    l1Token: EvmAddress,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _logger: winston.Logger
   ) {
     const { address: l1Address, abi: l1Abi } = CONTRACT_ADDRESSES[hubChainId].scrollGatewayRouter;
     const l2Abi = CONTRACT_ADDRESSES[l2chainId].scrollGatewayRouter.abi;
     const { l1: l1BridgeAddress, l2: l2BridgeAddress } =
-      SCROLL_CUSTOM_GATEWAY[l1Token.toAddress()] ?? SCROLL_STANDARD_GATEWAY;
+      SCROLL_CUSTOM_GATEWAY[l1Token.toNative()] ?? SCROLL_STANDARD_GATEWAY;
 
     const { address: gasPriceOracleAddress, abi: gasPriceOracleAbi } =
       CONTRACT_ADDRESSES[hubChainId].scrollGasPriceOracle;
@@ -51,8 +53,6 @@ export class ScrollERC20Bridge extends BaseBridgeAdapter {
 
     this.scrollGatewayRouter = new Contract(l1Address, l1Abi, l1Signer);
     this.scrollGasPriceOracle = new Contract(gasPriceOracleAddress, gasPriceOracleAbi, l1Signer);
-
-    this.hubPoolAddress = CONTRACT_ADDRESSES[hubChainId].hubPool.address;
   }
 
   async constructL1ToL2Txn(
@@ -66,7 +66,7 @@ export class ScrollERC20Bridge extends BaseBridgeAdapter {
     return Promise.resolve({
       contract: this.getScrollGatewayRouter(),
       method: "depositERC20",
-      args: [l1Token.toAddress(), toAddress.toAddress(), amount, this.l2Gas],
+      args: [l1Token.toNative(), toAddress.toNative(), amount, this.l2Gas],
       value: bufferedFee,
     });
   }
@@ -83,18 +83,18 @@ export class ScrollERC20Bridge extends BaseBridgeAdapter {
     toAddress: EvmAddress,
     eventConfig: EventSearchConfig
   ): Promise<BridgeEvents> {
-    const isL2Contract = await isContractDeployedToAddress(toAddress.toAddress(), this.l2Bridge.provider);
-    const monitoredFromAddress = isL2Contract ? this.hubPoolAddress : fromAddress.toAddress();
+    const isL2Contract = await isContractDeployedToAddress(toAddress.toNative(), this.l2Bridge.provider);
+    const monitoredFromAddress: string = isL2Contract ? this.hubPoolAddress.toNative() : fromAddress.toNative();
 
     const l1Bridge = this.getL1Bridge();
     const events = await paginatedEventQuery(
       l1Bridge,
-      l1Bridge.filters.DepositERC20(l1Token.toAddress(), undefined, monitoredFromAddress),
+      l1Bridge.filters.DepositERC20(l1Token.toNative(), undefined, monitoredFromAddress),
       eventConfig
     );
     // Take all events which are sending an amount greater than 0.
     const processedEvents = events
-      .filter(({ args }) => args.to === toAddress.toAddress())
+      .filter(({ args }) => args.to === toAddress.toNative())
       .map((event) => processEvent(event, "amount"))
       .filter(({ amount }) => amount.gt(bnZero));
     return {
@@ -108,17 +108,17 @@ export class ScrollERC20Bridge extends BaseBridgeAdapter {
     toAddress: EvmAddress,
     eventConfig: EventSearchConfig
   ): Promise<BridgeEvents> {
-    const isL2Contract = await isContractDeployedToAddress(toAddress.toAddress(), this.l2Bridge.provider);
-    const monitoredFromAddress = isL2Contract ? this.hubPoolAddress : fromAddress.toAddress();
+    const isL2Contract = await isContractDeployedToAddress(toAddress.toNative(), this.l2Bridge.provider);
+    const monitoredFromAddress: string = isL2Contract ? this.hubPoolAddress.toNative() : fromAddress.toNative();
 
     const l2Bridge = this.getL2Bridge();
     const events = await paginatedEventQuery(
       l2Bridge,
-      l2Bridge.filters.FinalizeDepositERC20(l1Token.toAddress(), undefined, monitoredFromAddress),
+      l2Bridge.filters.FinalizeDepositERC20(l1Token.toNative(), undefined, monitoredFromAddress),
       eventConfig
     );
     const processedEvents = events
-      .filter(({ args }) => args.to === toAddress.toAddress())
+      .filter(({ args }) => args.to === toAddress.toNative())
       .map((event) => processEvent(event, "amount"))
       .filter(({ amount }) => amount.gt(bnZero));
     return {
@@ -135,7 +135,7 @@ export class ScrollERC20Bridge extends BaseBridgeAdapter {
   }
 
   protected override resolveL2TokenAddress(l1Token: EvmAddress): string {
-    if (compareAddressesSimple(TOKEN_SYMBOLS_MAP.USDC.addresses[this.hubChainId], l1Token.toAddress())) {
+    if (compareAddressesSimple(TOKEN_SYMBOLS_MAP.USDC.addresses[this.hubChainId], l1Token.toNative())) {
       return TOKEN_SYMBOLS_MAP.USDC.addresses[this.l2chainId]; // Scroll only has one USDC token type.
     }
     return super.resolveL2TokenAddress(l1Token);

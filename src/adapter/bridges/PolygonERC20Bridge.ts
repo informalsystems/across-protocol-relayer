@@ -8,6 +8,7 @@ import {
   bnToHex,
   ZERO_ADDRESS,
   EvmAddress,
+  winston,
 } from "../../utils";
 import { CONTRACT_ADDRESSES } from "../../common";
 import { BridgeTransactionDetails, BaseBridgeAdapter, BridgeEvents } from "./BaseBridgeAdapter";
@@ -25,7 +26,9 @@ export class PolygonERC20Bridge extends BaseBridgeAdapter {
     hubChainId: number,
     l1Signer: Signer,
     l2SignerOrProvider: Signer | Provider,
-    l1Token: EvmAddress
+    l1Token: EvmAddress,
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+    _logger: winston.Logger
   ) {
     // @dev This method fetches the *SDK's* most up-to-date values of
     // TOKEN_SYMBOLS_MAP. This constructor will therefore break if
@@ -53,7 +56,7 @@ export class PolygonERC20Bridge extends BaseBridgeAdapter {
     return Promise.resolve({
       contract: this.l1Gateway,
       method: "depositFor",
-      args: [toAddress.toAddress(), l1Token.toAddress(), bnToHex(amount)],
+      args: [toAddress.toNative(), l1Token.toNative(), bnToHex(amount)],
     });
   }
 
@@ -65,7 +68,7 @@ export class PolygonERC20Bridge extends BaseBridgeAdapter {
   ): Promise<BridgeEvents> {
     const events = await paginatedEventQuery(
       this.getL1Bridge(),
-      this.getL1Bridge().filters.LockedERC20(undefined, toAddress.toAddress(), l1Token.toAddress()),
+      this.getL1Bridge().filters.LockedERC20(undefined, toAddress.toNative(), l1Token.toNative()),
       eventConfig
     );
     return {
@@ -81,7 +84,7 @@ export class PolygonERC20Bridge extends BaseBridgeAdapter {
   ): Promise<BridgeEvents> {
     const events = await paginatedEventQuery(
       this.getL2Bridge(),
-      this.getL2Bridge().filters.Transfer(ZERO_ADDRESS, toAddress.toAddress()),
+      this.getL2Bridge().filters.Transfer(ZERO_ADDRESS, toAddress.toNative()),
       eventConfig
     );
     return {
