@@ -115,8 +115,10 @@ export async function getFlashbotsProvider(
     const relayUrl = getFlashbotsRelayUrl(chainId);
     const networkName = getFlashbotsNetworkName(chainId);
 
+    // Cast to BaseProvider as Flashbots v0.5.0 expects the concrete class
+    // Most providers returned by getProvider() are actually BaseProvider instances
     const flashbotsProvider = await FlashbotsBundleProvider.create(
-        provider,
+        provider as ethers.providers.BaseProvider,
         authSigner,
         relayUrl,
         networkName
