@@ -38,8 +38,8 @@ export function shouldUseFlashbotsForMethod(method: string): boolean {
  * @returns True if Flashbots is supported on the chain
  */
 export function isFlashbotsSupportedChain(chainId: number): boolean {
-    // Flashbots currently supports Ethereum mainnet (1) and Goerli testnet (5)
-    const supportedChains = new Set([1, 5]);
+    // Flashbots currently supports Ethereum mainnet (1) and Sepolia testnet (11155111)
+    const supportedChains = new Set([1, 11155111]);
     return supportedChains.has(chainId);
 }
 
@@ -54,6 +54,7 @@ export function shouldUseFlashbots(chainId: number, method: string): boolean {
 }
 
 /**
+ * TODO: load Flashbots relay urls from .env config file
  * Gets the Flashbots relay URL for a given chain
  * @param chainId The chain ID
  * @returns The Flashbots relay URL
@@ -69,8 +70,8 @@ export function getFlashbotsRelayUrl(chainId: number): string {
     switch (chainId) {
         case 1:
             return "https://relay.flashbots.net";
-        case 5:
-            return "https://relay-goerli.flashbots.net";
+        case 11155111:
+            return "https://relay-sepolia.flashbots.net";
         default:
             throw new Error(`Flashbots relay URL not configured for chain ${chainId}`);
     }
@@ -85,8 +86,8 @@ function getFlashbotsNetworkName(chainId: number): string {
     switch (chainId) {
         case 1:
             return "mainnet";
-        case 5:
-            return "goerli";
+        case 11155111:
+            return "sepolia";
         default:
             return "mainnet"; // Default fallback
     }
