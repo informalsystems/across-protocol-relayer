@@ -20,6 +20,10 @@ import {
   EvmGasPriceEstimate,
   SVMProvider,
   parseUnits,
+  shouldUseFlashbots,
+  getFlashbotsProvider,
+  getFlashbotsMaxBlockNumber,
+  logFlashbotsSubmission,
 } from "../utils";
 import {
   CompilableTransactionMessage,
@@ -183,15 +187,91 @@ export async function runTransaction(
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
       txConfig.type = 0; // Legacy transaction type
     }
-    if (sendRawTransaction) {
-      // For legacy chains, ensure we're sending a legacy transaction
-      const rawTxConfig = LEGACY_TRANSACTION_CHAINS.includes(chainId)
-        ? { to: contract.address, value, ...gas, type: 0 }
-        : { to: contract.address, value, ...gas };
 
-      return await (await contract.signer).sendTransaction(rawTxConfig);
+    // Check if we should use Flashbots for this transaction
+    const useFlashbots = shouldUseFlashbots(chainId, method);
+
+    if (useFlashbots) {
+      // Flashbots path: Get unsigned transaction and send via Flashbots relay
+      logFlashbotsSubmission(logger, method, chainId);
+
+      let unsignedTx: ethers.providers.TransactionRequest;
+
+      if (sendRawTransaction) {
+        // For raw transactions, use the config directly
+        unsignedTx = LEGACY_TRANSACTION_CHAINS.includes(chainId)
+          ? { to: contract.address, value, ...gas, type: 0 }
+          : { to: contract.address, value, ...gas };
+      } else {
+        // For contract method calls, use populateTransaction to get the unsigned tx
+        unsignedTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
+      }
+
+      // Get the Flashbots provider and send the private transaction
+      const flashbotsProvider = await getFlashbotsProvider(provider, chainId);
+      const currentBlockNumber = await provider.getBlockNumber();
+      const maxBlockNumber = getFlashbotsMaxBlockNumber(currentBlockNumber);
+
+      logger.debug({
+        at: "TxUtil",
+        message: "Sending via Flashbots",
+        currentBlockNumber,
+        maxBlockNumber,
+        method,
+      });
+
+      // Send the private transaction via Flashbots
+      // This returns a FlashbotsPrivateTransaction object
+      const flashbotsResponse = await flashbotsProvider.sendPrivateTransaction(
+        {
+          transaction: unsignedTx,
+          signer: contract.signer,
+        },
+        {
+          maxBlockNumber,
+        }
+      );
+
+      // Get the transaction hash from the signed transaction
+      const signedTx = await contract.signer.signTransaction(unsignedTx);
+      const txHash = ethers.utils.parseTransaction(signedTx).hash;
+
+      if (!txHash) {
+        throw new Error("Failed to get transaction hash from Flashbots submission");
+      }
+
+      logger.debug({
+        at: "TxUtil",
+        message: "Transaction sent via Flashbots",
+        hash: txHash,
+        maxBlockNumber,
+      });
+
+      // Return a TransactionResponse-like object
+      // Flashbots doesn't return a full TransactionResponse immediately, so we construct one
+      // The transaction will be available once it's mined
+      return {
+        hash: txHash,
+        from: await contract.signer.getAddress(),
+        ...unsignedTx,
+        confirmations: 0,
+        wait: async (confirmations?: number) => {
+          // Wait for the transaction to be mined
+          return provider.waitForTransaction(txHash, confirmations);
+        },
+      } as TransactionResponse;
     } else {
-      return await contract[method](...(args as Array<unknown>), txConfig);
+      // Standard path: Send transaction through public mempool
+      if (sendRawTransaction) {
+        // For legacy chains, ensure we're sending a legacy transaction
+        const rawTxConfig = LEGACY_TRANSACTION_CHAINS.includes(chainId)
+          ? { to: contract.address, value, ...gas, type: 0 }
+          : { to: contract.address, value, ...gas };
+
+        return await (await contract.signer).sendTransaction(rawTxConfig);
+      } else {
+        return await contract[method](...(args as Array<unknown>), txConfig);
+      }
     }
   } catch (error) {
     if (retriesRemaining > 0 && txnRetryable(error)) {
@@ -452,13 +532,13 @@ export async function willSucceed(transaction: AugmentedTransaction): Promise<Tr
 
 export function getTarget(targetAddress: string):
   | {
-      chainId: number;
-      contractName: string;
-      targetAddress: string;
-    }
+    chainId: number;
+    contractName: string;
+    targetAddress: string;
+  }
   | {
-      targetAddress: string;
-    } {
+    targetAddress: string;
+  } {
   try {
     return { targetAddress, ...getContractInfoFromAddress(targetAddress) };
   } catch (error) {

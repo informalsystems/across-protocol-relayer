@@ -22,6 +22,7 @@
     "@ethersproject/abstract-provider": "^5.7.0",
     "@ethersproject/abstract-signer": "^5.7.0",
     "@ethersproject/bignumber": "^5.7.0",
+    "@flashbots/ethers-provider-bundle": "^1.0.0",
     "@google-cloud/kms": "^3.6.0",
     "@google-cloud/storage": "^6.10.1",
     "@maticnetwork/maticjs": "^3.6.0",
