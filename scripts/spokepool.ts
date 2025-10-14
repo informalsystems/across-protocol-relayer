@@ -84,10 +84,10 @@ function printDeposit(originChainId: number, log: LogDescription): void {
 
   console.log(
     `Deposit # ${log.args.depositId} on ${getNetworkName(originChainId)}:\n` +
-      Object.entries(fields)
-        .map(([k, v]) => `\t${k.padEnd(padLeft)} : ${v}`)
-        .join("\n") +
-      "\n"
+    Object.entries(fields)
+      .map(([k, v]) => `\t${k.padEnd(padLeft)} : ${v}`)
+      .join("\n") +
+    "\n"
   );
 }
 
@@ -103,10 +103,10 @@ function printFill(destinationChainId: number, log: LogDescription): void {
   };
   console.log(
     `Fill for ${getNetworkName(originChainId)} deposit # ${log.args.depositId}:\n` +
-      Object.entries(fields)
-        .map(([k, v]) => `\t${k.padEnd(padLeft)} : ${v}`)
-        .join("\n") +
-      "\n"
+    Object.entries(fields)
+      .map(([k, v]) => `\t${k.padEnd(padLeft)} : ${v}`)
+      .join("\n") +
+    "\n"
   );
 }
 
@@ -120,7 +120,7 @@ async function getSuggestedFees(params: RelayerFeeQuery, timeout: number) {
     return quote.data;
   } catch (err) {
     if (isAxiosError(err) && err.response.status >= 400) {
-      throw new Error(`Failed to get quote for deposit (${err.response.data})`);
+      throw new Error(`Failed to get quote for deposit (${err.response.status} ${err.response.statusText})`);
     }
     throw err;
   }
@@ -167,7 +167,19 @@ async function getRelayerQuote(
   const timeout = 5000;
 
   const suggestedFees = async () => {
-    const quoteData = await getSuggestedFees(params, timeout);
+    // const quoteData = await getSuggestedFees(params, timeout);
+    // use hardcoded quote data for now as suggested-fees endpoint isn't enabled in testnet
+
+
+    const quoteData = {
+      totalRelayFee: { total: "254792032367" },
+      exclusiveRelayer: "0x0000000000000000000000000000000000000000000000000000000000000000",
+      exclusivityDeadline: String(Math.floor(Date.now() / 1000) + 120),
+      timestamp: String(Math.floor(Date.now() / 1000)),
+      fillDeadline: String(Math.floor(Date.now() / 1000) + 120),
+      estimatedFillTimeSec: 9,
+    };
+
     const {
       totalRelayFee: { total: totalRelayFee },
       exclusiveRelayer,
@@ -176,6 +188,8 @@ async function getRelayerQuote(
       estimatedFillTimeSec: estimatedFillTime,
       fillDeadline,
     } = quoteData;
+
+    console.log("quoteData", quoteData);
 
     [totalRelayFee, exclusiveRelayer, exclusivityDeadline, quoteTimestamp, estimatedFillTime, fillDeadline].forEach(
       (field) => {
@@ -441,10 +455,10 @@ async function dumpConfig(args: Record<string, number | string>, _signer: Signer
   const padLeft = Object.keys(fields).reduce((acc, cur) => (cur.length > acc ? cur.length : acc), 0);
   console.log(
     `${getNetworkName(chainId)} SpokePool configuration:\n` +
-      Object.entries(fields)
-        .map(([k, v]) => `\t${k.padEnd(padLeft)} : ${v}`)
-        .join("\n") +
-      "\n"
+    Object.entries(fields)
+      .map(([k, v]) => `\t${k.padEnd(padLeft)} : ${v}`)
+      .join("\n") +
+    "\n"
   );
 
   return true;

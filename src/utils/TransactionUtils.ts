@@ -204,7 +204,50 @@ export async function runTransaction(
           : { to: contract.address, value, ...gas };
       } else {
         // For contract method calls, use populateTransaction to get the unsigned tx
-        unsignedTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
+        const populatedTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
+
+        // Helper to convert BigNumber to hex string
+        const toHexString = (value: any): string | undefined => {
+          if (!value) return undefined;
+          if (BigNumber.isBigNumber(value)) return value.toHexString();
+          if (value.type === "BigNumber" && value.hex) {
+            return value.hex;
+          }
+          return BigNumber.from(value).toHexString();
+        };
+
+        // Flashbots requires LEGACY transaction format (not EIP-1559)
+        // Convert maxFeePerGas to gasPrice for compatibility
+        // Use maxFeePerGas as gasPrice since that's the maximum we're willing to pay
+        const gasPriceForFlashbots = populatedTx.maxFeePerGas || populatedTx.gasPrice;
+
+        // Build legacy transaction for Flashbots (no maxFeePerGas/maxPriorityFeePerGas)
+        unsignedTx = {
+          to: populatedTx.to,
+          data: populatedTx.data,
+          gasLimit: toHexString(populatedTx.gasLimit),
+          gasPrice: toHexString(gasPriceForFlashbots),  // Use gasPrice instead of maxFeePerGas
+          value: toHexString(populatedTx.value),
+          nonce: populatedTx.nonce,
+          chainId: populatedTx.chainId,
+          type: 0,  // Force legacy transaction type
+        };
+
+        // DEBUG: Log conversion to legacy format
+        logger.debug({
+          at: "TxUtil#Flashbots",
+          message: "Transaction converted to legacy format for Flashbots",
+          original: {
+            maxFeePerGas: populatedTx.maxFeePerGas?.toString(),
+            maxPriorityFeePerGas: populatedTx.maxPriorityFeePerGas?.toString(),
+            type: populatedTx.type,
+          },
+          converted: {
+            gasPrice: unsignedTx.gasPrice,
+            type: unsignedTx.type,
+            note: "Using maxFeePerGas as gasPrice for Flashbots compatibility",
+          },
+        });
       }
 
       // Get the Flashbots provider and send the private transaction
@@ -214,42 +257,191 @@ export async function runTransaction(
 
       logger.debug({
         at: "TxUtil",
-        message: "Sending via Flashbots",
+        message: "Sending via Flashbots - BEFORE send",
         currentBlockNumber,
         maxBlockNumber,
         method,
+        unsignedTx: {
+          to: unsignedTx.to,
+          nonce: unsignedTx.nonce,
+          gasLimit: unsignedTx.gasLimit,
+          maxFeePerGas: unsignedTx.maxFeePerGas,
+          maxPriorityFeePerGas: unsignedTx.maxPriorityFeePerGas,
+          type: unsignedTx.type,           // CRITICAL: Must be 2 for EIP-1559
+          chainId: unsignedTx.chainId,     // CRITICAL: Must be present
+          valueTypes: {
+            gasLimit: typeof unsignedTx.gasLimit,
+            maxFeePerGas: typeof unsignedTx.maxFeePerGas,
+            type: typeof unsignedTx.type,
+            chainId: typeof unsignedTx.chainId,
+          },
+        },
       });
 
-      // Send the private transaction via Flashbots
-      // This returns a FlashbotsPrivateTransaction object
+
+      // Step 1: Sign the transaction
+      const signedTx = await contract.signer.signTransaction(unsignedTx);
+      const txHash = ethers.utils.parseTransaction(signedTx).hash;
+
+      logger.debug({
+        at: "TxUtil#Flashbots",
+        message: "Transaction signed",
+        txHash,
+        signedTxLength: signedTx.length,
+      });
+
+      // Step 2: Simulate before sending (optional, enabled via FLASHBOTS_SIMULATE=true)
+      const shouldSimulate = process.env.FLASHBOTS_SIMULATE === "true";
+      if (shouldSimulate) {
+        try {
+          logger.debug({
+            at: "TxUtil#Flashbots",
+            message: "Simulating transaction before Flashbots submission",
+            method,
+            targetBlock: currentBlockNumber + 1,
+          });
+
+          const simulation = await flashbotsProvider.simulate([signedTx], currentBlockNumber + 1);
+
+          // Check if simulation is an error response
+          if ("error" in simulation) {
+            logger.warn({
+              at: "TxUtil#Flashbots",
+              message: "Flashbots simulation returned error",
+              error: simulation.error,
+            });
+          } else {
+            // SimulationResponseSuccess
+            const firstResult = simulation.results?.[0];
+            const isSuccess = firstResult && !("error" in firstResult);
+
+            logger.info({
+              at: "TxUtil#Flashbots",
+              message: "Flashbots simulation result",
+              method,
+              bundleHash: simulation.bundleHash,
+              coinbaseDiff: simulation.coinbaseDiff.toString(),
+              totalGasUsed: simulation.totalGasUsed,
+              firstResult: {
+                success: isSuccess,
+                error: !isSuccess && "error" in firstResult ? firstResult.error : undefined,
+                revert: !isSuccess && "revert" in firstResult ? firstResult.revert : undefined,
+                gasUsed: firstResult?.gasUsed,
+              },
+            });
+
+            // If simulation failed, potentially abort
+            if (!isSuccess && "error" in firstResult) {
+              const abortOnSimFail = process.env.FLASHBOTS_ABORT_ON_SIMULATION_FAIL === "true";
+              if (abortOnSimFail) {
+                throw new Error(`Flashbots simulation failed: ${firstResult.error} - ${firstResult.revert}`);
+              }
+            }
+          }
+        } catch (simError) {
+          logger.warn({
+            at: "TxUtil#Flashbots",
+            message: "Flashbots simulation error (continuing with submission)",
+            error: stringifyThrownValue(simError),
+          });
+        }
+      }
+
+      // Step 3: Send the PRE-SIGNED transaction via Flashbots
       const flashbotsResponse = await flashbotsProvider.sendPrivateTransaction(
         {
-          transaction: unsignedTx,
-          signer: contract.signer,
+          signedTransaction: signedTx,
         },
         {
           maxBlockNumber,
         }
       );
 
-      // Get the transaction hash from the signed transaction
-      const signedTx = await contract.signer.signTransaction(unsignedTx);
-      const txHash = ethers.utils.parseTransaction(signedTx).hash;
-
       if (!txHash) {
         throw new Error("Failed to get transaction hash from Flashbots submission");
       }
 
-      logger.debug({
-        at: "TxUtil",
-        message: "Transaction sent via Flashbots",
+      // Check if response is an error
+      if ("error" in flashbotsResponse) {
+        logger.error({
+          at: "TxUtil#Flashbots",
+          message: "Flashbots relay returned error",
+          error: flashbotsResponse.error,
+          hash: txHash,
+        });
+        throw new Error(`Flashbots error: ${flashbotsResponse.error.message}`);
+      }
+
+      logger.info({
+        at: "TxUtil#Flashbots",
+        message: "Transaction submitted to Flashbots relay 🥷",
         hash: txHash,
+        currentBlock: currentBlockNumber,
         maxBlockNumber,
+        validForBlocks: maxBlockNumber - currentBlockNumber,
+        flashbotsResponse: {
+          account: flashbotsResponse.transaction.account,
+          nonce: flashbotsResponse.transaction.nonce,
+        },
       });
 
+      // Step 4: Wait for transaction inclusion using Flashbots response
+      const shouldWait = process.env.FLASHBOTS_WAIT === "true";
+      if (shouldWait) {
+        try {
+          logger.debug({
+            at: "TxUtil#Flashbots",
+            message: "Waiting for Flashbots transaction resolution...",
+            hash: txHash,
+            maxBlockNumber,
+          });
+
+          // Use Flashbots' built-in wait method
+          // This waits until the transaction is mined OR maxBlockNumber is reached
+          const resolution = await flashbotsResponse.wait();
+
+          logger.info({
+            at: "TxUtil#Flashbots",
+            message: "Flashbots transaction resolution",
+            hash: txHash,
+            resolution: resolution,
+          });
+
+          // Get the actual transaction receipt
+          const receipts = await flashbotsResponse.receipts();
+          if (receipts && receipts.length > 0) {
+            const receipt = receipts[0];
+            logger.info({
+              at: "TxUtil#Flashbots",
+              message: "Flashbots transaction mined ⛏️",
+              hash: txHash,
+              blockNumber: receipt.blockNumber,
+              status: receipt.status,
+              gasUsed: receipt.gasUsed.toString(),
+              effectiveGasPrice: receipt.effectiveGasPrice?.toString(),
+              includedInBlock: receipt.blockNumber - currentBlockNumber,
+            });
+          } else {
+            logger.warn({
+              at: "TxUtil#Flashbots",
+              message: "Flashbots transaction not mined within validity window",
+              hash: txHash,
+              resolution,
+              maxBlockNumber,
+              note: "Transaction may have been dropped or not competitive enough",
+            });
+          }
+        } catch (waitError) {
+          logger.warn({
+            at: "TxUtil#Flashbots",
+            message: "Error waiting for Flashbots transaction",
+            hash: txHash,
+            error: stringifyThrownValue(waitError),
+          });
+        }
+      }
+
       // Return a TransactionResponse-like object
-      // Flashbots doesn't return a full TransactionResponse immediately, so we construct one
-      // The transaction will be available once it's mined
       return {
         hash: txHash,
         from: await contract.signer.getAddress(),
