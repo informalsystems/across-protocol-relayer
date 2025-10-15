@@ -233,21 +233,6 @@ export async function runTransaction(
           type: 0,  // Force legacy transaction type
         };
 
-        // DEBUG: Log conversion to legacy format
-        logger.debug({
-          at: "TxUtil#Flashbots",
-          message: "Transaction converted to legacy format for Flashbots",
-          original: {
-            maxFeePerGas: populatedTx.maxFeePerGas?.toString(),
-            maxPriorityFeePerGas: populatedTx.maxPriorityFeePerGas?.toString(),
-            type: populatedTx.type,
-          },
-          converted: {
-            gasPrice: unsignedTx.gasPrice,
-            type: unsignedTx.type,
-            note: "Using maxFeePerGas as gasPrice for Flashbots compatibility",
-          },
-        });
       }
 
       // Get the Flashbots provider and send the private transaction
@@ -256,8 +241,8 @@ export async function runTransaction(
       const maxBlockNumber = getFlashbotsMaxBlockNumber(currentBlockNumber);
 
       logger.debug({
-        at: "TxUtil",
-        message: "Sending via Flashbots - BEFORE send",
+        at: "TxUtil#Flashbots",
+        message: "Sending TX via Flashbots",
         currentBlockNumber,
         maxBlockNumber,
         method,
@@ -385,19 +370,16 @@ export async function runTransaction(
         },
       });
 
-      // Step 4: Wait for transaction inclusion using Flashbots response
-      const shouldWait = process.env.FLASHBOTS_WAIT === "true";
-      if (shouldWait) {
+      // Step 4: Wait for transaction inclusion (only during simulation)
+      if (shouldSimulate) {
         try {
           logger.debug({
             at: "TxUtil#Flashbots",
-            message: "Waiting for Flashbots transaction resolution...",
+            message: "Waiting for Flashbots transaction resolution (simulation mode)...",
             hash: txHash,
             maxBlockNumber,
           });
 
-          // Use Flashbots' built-in wait method
-          // This waits until the transaction is mined OR maxBlockNumber is reached
           const resolution = await flashbotsResponse.wait();
 
           logger.info({
@@ -441,15 +423,43 @@ export async function runTransaction(
         }
       }
 
-      // Return a TransactionResponse-like object
+      // Return a TransactionResponse-like object using the Flashbots response
+      // This matches the standard path behavior where we return the result of contract[method]()
       return {
         hash: txHash,
         from: await contract.signer.getAddress(),
-        ...unsignedTx,
+        nonce: flashbotsResponse.transaction.nonce,
+        gasLimit: unsignedTx.gasLimit,
+        gasPrice: unsignedTx.gasPrice,
+        data: unsignedTx.data,
+        value: unsignedTx.value,
+        chainId: unsignedTx.chainId,
         confirmations: 0,
         wait: async (confirmations?: number) => {
-          // Wait for the transaction to be mined
-          return provider.waitForTransaction(txHash, confirmations);
+          // Log Flashbots response details when wait() is called
+          logger.info({
+            at: "TxUtil#Flashbots#wait",
+            message: "Flashbots transaction response details",
+            hash: txHash,
+            method,
+            flashbotsResponse: {
+              account: flashbotsResponse.transaction.account,
+              nonce: flashbotsResponse.transaction.nonce,
+              signedTransactionLength: flashbotsResponse.transaction.signedTransaction.length,
+            },
+            transactionDetails: {
+              from: await contract.signer.getAddress(),
+              to: unsignedTx.to,
+              gasLimit: unsignedTx.gasLimit,
+              gasPrice: unsignedTx.gasPrice,
+              value: unsignedTx.value,
+              chainId: unsignedTx.chainId,
+            },
+            note: "Flashbots transaction details logged when wait() is called",
+          });
+
+          // Use standard provider wait (never Flashbots wait outside simulation)
+          return provider.waitForTransaction(txHash, confirmations || 1);
         },
       } as TransactionResponse;
     } else {
