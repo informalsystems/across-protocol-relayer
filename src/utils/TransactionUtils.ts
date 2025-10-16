@@ -1,4 +1,5 @@
 import { gasPriceOracle, typeguards, utils as sdkUtils } from "@across-protocol/sdk";
+import { FlashbotsBundleProvider, FlashbotsTransactionResolution } from "@flashbots/ethers-provider-bundle";
 import { FeeData } from "@ethersproject/abstract-provider";
 import dotenv from "dotenv";
 import { AugmentedTransaction } from "../clients";
@@ -33,6 +34,7 @@ import {
   type Blockhash,
 } from "@solana/kit";
 import { UsdcTokenSplitterBridge } from "../adapter/bridges";
+import { Transaction } from "@solana/web3.js";
 
 dotenv.config();
 
@@ -265,77 +267,6 @@ export async function runTransaction(
         },
       });
 
-
-
-      // const targetBlockNumber = currentBlockNumber + 5;
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Simulating bundle",
-      //   targetBlockNumber: targetBlockNumber,
-      // });
-
-      // const signedTransactions = await flashbotsProvider.signBundle([
-      //   {
-      //     signer: contract.signer,
-      //     transaction: unsignedTx
-      //   },
-      // ])
-
-      // const simulation = await flashbotsProvider.simulate(signedTransactions, targetBlockNumber);
-
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Simulation result",
-      //   simulation: simulation,
-      // });
-
-      // const bundleResponse = await flashbotsProvider.sendBundle([{
-      //   signer: contract.signer,
-      //   transaction: unsignedTx,
-      // }
-      // ], targetBlockNumber)
-
-      // if ("error" in bundleResponse) {
-      //   throw new Error(`Flashbots bundle error: ${bundleResponse.error.message}`);
-      // }
-
-      // const txReceipt = bundleResponse.bundleTransactions ? bundleResponse.bundleTransactions[0] : undefined;
-
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Bundle sent",
-      //   bundleHash: bundleResponse.bundleHash,
-      //   TargetBlockNumber: targetBlockNumber,
-      //   TxAccount: txReceipt.account,
-      //   TxNonce: txReceipt.nonce,
-      //   TxHash: txReceipt.hash,
-      // });
-
-      // const waitResponse = await bundleResponse.wait()
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Bundle response received",
-      //   inclusion: waitResponse,
-      // });
-
-
-      // const bundleStats = await flashbotsProvider.getBundleStatsV2(bundleResponse.bundleHash, targetBlockNumber)
-
-      // if ("error" in bundleStats) {
-      //   throw new Error(`Flashbots bundle stats error: ${bundleStats.error.message}`);
-      // }
-
-      // const txHash = txReceipt ? txReceipt.transactionHash : undefined;
-
-
-
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Bundle stats",
-      //   bundleStats: bundleStats,
-      // });
-
-
       // Flasbots Private Transaction Submission
 
       // Step 1: Sign the transaction
@@ -502,7 +433,7 @@ export async function runTransaction(
             at: "TxUtil#Flashbots",
             message: "Flashbots transaction resolution",
             hash: txHash,
-            resolution: resolution,
+            resolution: resolution == FlashbotsTransactionResolution.TransactionIncluded ? "TxIncluded" : "TxDropped",
           });
           // FlashbotsTransactionResolution: TxIncluded = 0, TxDropped = 1 
 
@@ -540,8 +471,74 @@ export async function runTransaction(
         }
       }
 
-      // flashbotsProvider.waitForBundleResolution(bundleHash);
 
+      // const targetBlockNumber = currentBlockNumber + 5;
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Simulating bundle",
+      //   targetBlockNumber: targetBlockNumber,
+      // });
+
+      // const signedTransactions = await flashbotsProvider.signBundle([
+      //   {
+      //     signer: contract.signer,
+      //     transaction: unsignedTx
+      //   },
+      // ])
+
+      // const simulation = await flashbotsProvider.simulate(signedTransactions, targetBlockNumber);
+
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Simulation result",
+      //   simulation: simulation,
+      // });
+
+      // const bundleResponse = await flashbotsProvider.sendBundle([{
+      //   signer: contract.signer,
+      //   transaction: unsignedTx,
+      // }
+      // ], targetBlockNumber)
+
+      // if ("error" in bundleResponse) {
+      //   throw new Error(`Flashbots bundle error: ${bundleResponse.error.message}`);
+      // }
+
+      // const txReceipt = bundleResponse.bundleTransactions ? bundleResponse.bundleTransactions[0] : undefined;
+
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Bundle sent",
+      //   bundleHash: bundleResponse.bundleHash,
+      //   TargetBlockNumber: targetBlockNumber,
+      //   TxAccount: txReceipt.account,
+      //   TxNonce: txReceipt.nonce,
+      //   TxHash: txReceipt.hash,
+      // });
+
+      // const waitResponse = await bundleResponse.wait()
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Bundle response received",
+      //   inclusion: waitResponse,
+      // });
+
+
+      // const bundleStats = await flashbotsProvider.getBundleStatsV2(bundleResponse.bundleHash, targetBlockNumber)
+
+      // if ("error" in bundleStats) {
+      //   throw new Error(`Flashbots bundle stats error: ${bundleStats.error.message}`);
+      // }
+
+      // const txHash = txReceipt ? txReceipt.transactionHash : undefined;
+
+
+
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Bundle stats",
+      //   bundleStats: bundleStats,
+      // });
 
       const txReceipt = txReceipts ? txReceipts[0] : undefined;
       // Return a TransactionResponse-like object using the Flashbots response
