@@ -32,6 +32,7 @@ import {
   signTransactionMessageWithSigners,
   type Blockhash,
 } from "@solana/kit";
+import { UsdcTokenSplitterBridge } from "../adapter/bridges";
 
 dotenv.config();
 
@@ -148,7 +149,7 @@ export async function runTransaction(
     // Check if the chain requires legacy transactions
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
       // For legacy chains ensure only gasPrice is present
-      gas = { gasPrice: gas.gasPrice || gas.maxFeePerGas };
+      gas = { gasPrice: gas.gasPrice.mul(sdkUtils.BigNumber.from(5)) || gas.maxFeePerGas.mul(sdkUtils.BigNumber.from(5)) };
     } else {
       // If the priority fee was overridden by the min/floor value, the base fee must be scaled up as well.
       const maxPriorityFeePerGas = sdkUtils.bnMax(gas.maxPriorityFeePerGas, flooredPriorityFeePerGas);
@@ -232,8 +233,8 @@ export async function runTransaction(
           chainId: populatedTx.chainId,
           type: 0,  // Force legacy transaction type
         };
-
       }
+
 
       // Get the Flashbots provider and send the private transaction
       const flashbotsProvider = await getFlashbotsProvider(provider, chainId);
@@ -250,6 +251,7 @@ export async function runTransaction(
           to: unsignedTx.to,
           nonce: unsignedTx.nonce,
           gasLimit: unsignedTx.gasLimit,
+          gasPrice: unsignedTx.gasPrice ? BigNumber.from(unsignedTx.gasPrice).toNumber() : undefined,
           maxFeePerGas: unsignedTx.maxFeePerGas,
           maxPriorityFeePerGas: unsignedTx.maxPriorityFeePerGas,
           type: unsignedTx.type,           // CRITICAL: Must be 2 for EIP-1559
@@ -263,6 +265,78 @@ export async function runTransaction(
         },
       });
 
+
+
+      // const targetBlockNumber = currentBlockNumber + 5;
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Simulating bundle",
+      //   targetBlockNumber: targetBlockNumber,
+      // });
+
+      // const signedTransactions = await flashbotsProvider.signBundle([
+      //   {
+      //     signer: contract.signer,
+      //     transaction: unsignedTx
+      //   },
+      // ])
+
+      // const simulation = await flashbotsProvider.simulate(signedTransactions, targetBlockNumber);
+
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Simulation result",
+      //   simulation: simulation,
+      // });
+
+      // const bundleResponse = await flashbotsProvider.sendBundle([{
+      //   signer: contract.signer,
+      //   transaction: unsignedTx,
+      // }
+      // ], targetBlockNumber)
+
+      // if ("error" in bundleResponse) {
+      //   throw new Error(`Flashbots bundle error: ${bundleResponse.error.message}`);
+      // }
+
+      // const txReceipt = bundleResponse.bundleTransactions ? bundleResponse.bundleTransactions[0] : undefined;
+
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Bundle sent",
+      //   bundleHash: bundleResponse.bundleHash,
+      //   TargetBlockNumber: targetBlockNumber,
+      //   TxAccount: txReceipt.account,
+      //   TxNonce: txReceipt.nonce,
+      //   TxHash: txReceipt.hash,
+      // });
+
+      // const waitResponse = await bundleResponse.wait()
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Bundle response received",
+      //   inclusion: waitResponse,
+      // });
+
+
+      // const bundleStats = await flashbotsProvider.getBundleStatsV2(bundleResponse.bundleHash, targetBlockNumber)
+
+      // if ("error" in bundleStats) {
+      //   throw new Error(`Flashbots bundle stats error: ${bundleStats.error.message}`);
+      // }
+
+      // const txHash = txReceipt ? txReceipt.transactionHash : undefined;
+
+
+
+      // logger.debug({
+      //   at: "TxUtil#Flashbots",
+      //   message: "Bundle stats",
+      //   bundleStats: bundleStats,
+      // });
+
+
+      // Flasbots Private Transaction Submission
 
       // Step 1: Sign the transaction
       const signedTx = await contract.signer.signTransaction(unsignedTx);
@@ -410,6 +484,8 @@ export async function runTransaction(
         },
       });
 
+
+      let txReceipts: ethers.providers.TransactionReceipt[] | undefined;
       // Step 4: Wait for transaction inclusion if env var is set
       if (process.env.FLASHBOTS_WAIT === "true") {
         try {
@@ -431,9 +507,9 @@ export async function runTransaction(
           // FlashbotsTransactionResolution: TxIncluded = 0, TxDropped = 1 
 
           // Get the actual transaction receipt
-          const receipts = await flashbotsResponse.receipts();
-          if (receipts && receipts.length > 0) {
-            const receipt = receipts[0];
+          txReceipts = await flashbotsResponse.receipts();
+          if (txReceipts && txReceipts.length > 0) {
+            const receipt = txReceipts[0];
             logger.info({
               at: "TxUtil#Flashbots",
               message: "Flashbots transaction mined ⛏️",
@@ -464,6 +540,10 @@ export async function runTransaction(
         }
       }
 
+      // flashbotsProvider.waitForBundleResolution(bundleHash);
+
+
+      const txReceipt = txReceipts ? txReceipts[0] : undefined;
       // Return a TransactionResponse-like object using the Flashbots response
       // This matches the standard path behavior where we return the result of contract[method]()
       return {
@@ -477,32 +557,10 @@ export async function runTransaction(
         chainId: unsignedTx.chainId,
         confirmations: 0,
         wait: async (confirmations?: number) => {
-          // Log Flashbots response details when wait() is called
-          logger.info({
-            at: "TxUtil#Flashbots#wait",
-            message: "Flashbots transaction response details",
-            hash: txHash,
-            method,
-            flashbotsResponse: {
-              account: flashbotsResponse.transaction.account,
-              nonce: flashbotsResponse.transaction.nonce,
-              signedTransactionLength: flashbotsResponse.transaction.signedTransaction.length,
-            },
-            transactionDetails: {
-              from: await contract.signer.getAddress(),
-              to: unsignedTx.to,
-              gasLimit: unsignedTx.gasLimit,
-              gasPrice: unsignedTx.gasPrice,
-              value: unsignedTx.value,
-              chainId: unsignedTx.chainId,
-            },
-            note: "Flashbots transaction details logged when wait() is called",
-          });
-
-          // Use standard provider wait (never Flashbots wait outside simulation)
-          return provider.waitForTransaction(txHash, confirmations || 0);
+          // Since we already have the receipt from Flashbots, return it directly
+          return txReceipt as any;
         },
-      } as TransactionResponse;
+      } as TransactionResponse
     } else {
       // Standard path: Send transaction through public mempool
       if (sendRawTransaction) {
