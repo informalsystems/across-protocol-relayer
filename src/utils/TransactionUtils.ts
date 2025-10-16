@@ -276,8 +276,7 @@ export async function runTransaction(
       });
 
       // Step 2: Simulate before sending (optional, enabled via FLASHBOTS_SIMULATE=true)
-      const shouldSimulate = process.env.FLASHBOTS_SIMULATE === "true";
-      if (shouldSimulate) {
+      if (process.env.FLASHBOTS_SIMULATE === "true") {
         try {
           logger.debug({
             at: "TxUtil#Flashbots",
@@ -332,7 +331,48 @@ export async function runTransaction(
         }
       }
 
-      // Step 3: Send the PRE-SIGNED transaction via Flashbots
+      // Step 3: Get and log Flashbots user stats before sending (mainnet only)
+      // Note: getUserStatsV2 is only available on mainnet relay, not Sepolia
+      if (chainId === 1) {
+        try {
+          const userStats = await flashbotsProvider.getUserStatsV2();
+          if ("error" in userStats) {
+            logger.warn({
+              at: "TxUtil#Flashbots",
+              message: "Flashbots user stats returned error",
+              error: userStats.error,
+              method,
+              hash: txHash,
+            });
+          } else {
+            logger.info({
+              at: "TxUtil#Flashbots",
+              message: "Flashbots user stats before submission",
+              stats: {
+                isHighPriority: userStats.isHighPriority,
+                allTimeValidatorPayments: userStats.allTimeValidatorPayments,
+                allTimeGasSimulated: userStats.allTimeGasSimulated,
+                last7dValidatorPayments: userStats.last7dValidatorPayments,
+                last7dGasSimulated: userStats.last7dGasSimulated,
+                last1dValidatorPayments: userStats.last1dValidatorPayments,
+                last1dGasSimulated: userStats.last1dGasSimulated,
+              },
+              method,
+              hash: txHash,
+            });
+          }
+        } catch (statsError) {
+          logger.warn({
+            at: "TxUtil#Flashbots",
+            message: "Failed to get Flashbots user stats",
+            error: stringifyThrownValue(statsError),
+            method,
+            hash: txHash,
+          });
+        }
+      }
+
+      // Step 4: Send the PRE-SIGNED transaction via Flashbots
       const flashbotsResponse = await flashbotsProvider.sendPrivateTransaction(
         {
           signedTransaction: signedTx,
@@ -370,12 +410,12 @@ export async function runTransaction(
         },
       });
 
-      // Step 4: Wait for transaction inclusion (only during simulation)
-      if (shouldSimulate) {
+      // Step 4: Wait for transaction inclusion if env var is set
+      if (process.env.FLASHBOTS_WAIT === "true") {
         try {
           logger.debug({
             at: "TxUtil#Flashbots",
-            message: "Waiting for Flashbots transaction resolution (simulation mode)...",
+            message: "Waiting for Flashbots transaction resolution ...",
             hash: txHash,
             maxBlockNumber,
           });
@@ -388,6 +428,7 @@ export async function runTransaction(
             hash: txHash,
             resolution: resolution,
           });
+          // FlashbotsTransactionResolution: TxIncluded = 0, TxDropped = 1 
 
           // Get the actual transaction receipt
           const receipts = await flashbotsResponse.receipts();
@@ -459,7 +500,7 @@ export async function runTransaction(
           });
 
           // Use standard provider wait (never Flashbots wait outside simulation)
-          return provider.waitForTransaction(txHash, confirmations || 1);
+          return provider.waitForTransaction(txHash, confirmations || 0);
         },
       } as TransactionResponse;
     } else {
