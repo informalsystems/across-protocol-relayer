@@ -1,3 +1,7 @@
+// Apply ethers v6 compatibility patch before any other imports
+// This ensures MEV-Share client gets the patched ethers module
+require("../ethers-v6-compat");
+
 import minimist from "minimist";
 import {
   config,

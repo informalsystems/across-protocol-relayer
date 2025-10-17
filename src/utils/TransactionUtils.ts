@@ -1,10 +1,10 @@
 import { gasPriceOracle, typeguards, utils as sdkUtils } from "@across-protocol/sdk";
-import { FlashbotsBundleProvider, FlashbotsTransactionResolution } from "@flashbots/ethers-provider-bundle";
 import { FeeData } from "@ethersproject/abstract-provider";
 import dotenv from "dotenv";
 import { AugmentedTransaction } from "../clients";
 import { DEFAULT_GAS_FEE_SCALERS } from "../common";
 import { EthersError } from "../interfaces";
+import { createHintPreferences, createTransactionOptions, getBuilders, getMevShareClient, isMevShareSupportedChain, Wallet } from "./MevShareUtils";
 import {
   BigNumber,
   bnZero,
@@ -21,10 +21,6 @@ import {
   EvmGasPriceEstimate,
   SVMProvider,
   parseUnits,
-  shouldUseFlashbots,
-  getFlashbotsProvider,
-  getFlashbotsMaxBlockNumber,
-  logFlashbotsSubmission,
 } from "../utils";
 import {
   CompilableTransactionMessage,
@@ -33,8 +29,6 @@ import {
   signTransactionMessageWithSigners,
   type Blockhash,
 } from "@solana/kit";
-import { UsdcTokenSplitterBridge } from "../adapter/bridges";
-import { Transaction } from "@solana/web3.js";
 
 dotenv.config();
 
@@ -131,6 +125,8 @@ export async function runTransaction(
       Number(process.env[`MAX_FEE_PER_GAS_SCALER_${chainId}`] || process.env.MAX_FEE_PER_GAS_SCALER) ||
       DEFAULT_GAS_FEE_SCALERS[chainId]?.maxFeePerGasScaler;
 
+
+    // TODO: check async calls are getting resolved in the correct order
     let gas = await getGasPrice(
       provider,
       priorityFeeScaler,
@@ -151,7 +147,7 @@ export async function runTransaction(
     // Check if the chain requires legacy transactions
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
       // For legacy chains ensure only gasPrice is present
-      gas = { gasPrice: gas.gasPrice.mul(sdkUtils.BigNumber.from(5)) || gas.maxFeePerGas.mul(sdkUtils.BigNumber.from(5)) };
+      gas = { gasPrice: gas.gasPrice || gas.maxFeePerGas };
     } else {
       // If the priority fee was overridden by the min/floor value, the base fee must be scaled up as well.
       const maxPriorityFeePerGas = sdkUtils.bnMax(gas.maxPriorityFeePerGas, flooredPriorityFeePerGas);
@@ -191,385 +187,22 @@ export async function runTransaction(
       txConfig.type = 0; // Legacy transaction type
     }
 
-    // Check if we should use Flashbots for this transaction
-    const useFlashbots = shouldUseFlashbots(chainId, method);
+    if (sendRawTransaction) {
+      // For legacy chains, ensure we're sending a legacy transaction
+      const rawTxConfig = LEGACY_TRANSACTION_CHAINS.includes(chainId)
+        ? { to: contract.address, value, ...gas, type: 0 }
+        : { to: contract.address, value, ...gas };
+      return await (await contract.signer).sendTransaction(rawTxConfig);
 
-    if (useFlashbots) {
-      // Flashbots path: Get unsigned transaction and send via Flashbots relay
-      logFlashbotsSubmission(logger, method, chainId);
-
-      let unsignedTx: ethers.providers.TransactionRequest;
-
-      if (sendRawTransaction) {
-        // For raw transactions, use the config directly
-        unsignedTx = LEGACY_TRANSACTION_CHAINS.includes(chainId)
-          ? { to: contract.address, value, ...gas, type: 0 }
-          : { to: contract.address, value, ...gas };
-      } else {
-        // For contract method calls, use populateTransaction to get the unsigned tx
-        const populatedTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
-
-        // Helper to convert BigNumber to hex string
-        const toHexString = (value: any): string | undefined => {
-          if (!value) return undefined;
-          if (BigNumber.isBigNumber(value)) return value.toHexString();
-          if (value.type === "BigNumber" && value.hex) {
-            return value.hex;
-          }
-          return BigNumber.from(value).toHexString();
-        };
-
-        // Flashbots requires LEGACY transaction format (not EIP-1559)
-        // Convert maxFeePerGas to gasPrice for compatibility
-        // Use maxFeePerGas as gasPrice since that's the maximum we're willing to pay
-        const gasPriceForFlashbots = populatedTx.maxFeePerGas || populatedTx.gasPrice;
-
-        // Build legacy transaction for Flashbots (no maxFeePerGas/maxPriorityFeePerGas)
-        unsignedTx = {
-          to: populatedTx.to,
-          data: populatedTx.data,
-          gasLimit: toHexString(populatedTx.gasLimit),
-          gasPrice: toHexString(gasPriceForFlashbots),  // Use gasPrice instead of maxFeePerGas
-          value: toHexString(populatedTx.value),
-          nonce: populatedTx.nonce,
-          chainId: populatedTx.chainId,
-          type: 0,  // Force legacy transaction type
-        };
-      }
-
-
-      // Get the Flashbots provider and send the private transaction
-      const flashbotsProvider = await getFlashbotsProvider(provider, chainId);
-      const currentBlockNumber = await provider.getBlockNumber();
-      const maxBlockNumber = getFlashbotsMaxBlockNumber(currentBlockNumber);
-
-      logger.debug({
-        at: "TxUtil#Flashbots",
-        message: "Sending TX via Flashbots",
-        currentBlockNumber,
-        maxBlockNumber,
-        method,
-        unsignedTx: {
-          to: unsignedTx.to,
-          nonce: unsignedTx.nonce,
-          gasLimit: unsignedTx.gasLimit,
-          gasPrice: unsignedTx.gasPrice ? BigNumber.from(unsignedTx.gasPrice).toNumber() : undefined,
-          maxFeePerGas: unsignedTx.maxFeePerGas,
-          maxPriorityFeePerGas: unsignedTx.maxPriorityFeePerGas,
-          type: unsignedTx.type,           // CRITICAL: Must be 2 for EIP-1559
-          chainId: unsignedTx.chainId,     // CRITICAL: Must be present
-          valueTypes: {
-            gasLimit: typeof unsignedTx.gasLimit,
-            maxFeePerGas: typeof unsignedTx.maxFeePerGas,
-            type: typeof unsignedTx.type,
-            chainId: typeof unsignedTx.chainId,
-          },
-        },
-      });
-
-      // Flasbots Private Transaction Submission
-
-      // Step 1: Sign the transaction
-      const signedTx = await contract.signer.signTransaction(unsignedTx);
-      const txHash = ethers.utils.parseTransaction(signedTx).hash;
-
-      logger.debug({
-        at: "TxUtil#Flashbots",
-        message: "Transaction signed",
-        txHash,
-        signedTxLength: signedTx.length,
-      });
-
-      // Step 2: Simulate before sending (optional, enabled via FLASHBOTS_SIMULATE=true)
-      if (process.env.FLASHBOTS_SIMULATE === "true") {
-        try {
-          logger.debug({
-            at: "TxUtil#Flashbots",
-            message: "Simulating transaction before Flashbots submission",
-            method,
-            targetBlock: currentBlockNumber + 1,
-          });
-
-          const simulation = await flashbotsProvider.simulate([signedTx], currentBlockNumber + 1);
-
-          // Check if simulation is an error response
-          if ("error" in simulation) {
-            logger.warn({
-              at: "TxUtil#Flashbots",
-              message: "Flashbots simulation returned error",
-              error: simulation.error,
-            });
-          } else {
-            // SimulationResponseSuccess
-            const firstResult = simulation.results?.[0];
-            const isSuccess = firstResult && !("error" in firstResult);
-
-            logger.info({
-              at: "TxUtil#Flashbots",
-              message: "Flashbots simulation result",
-              method,
-              bundleHash: simulation.bundleHash,
-              coinbaseDiff: simulation.coinbaseDiff.toString(),
-              totalGasUsed: simulation.totalGasUsed,
-              firstResult: {
-                success: isSuccess,
-                error: !isSuccess && "error" in firstResult ? firstResult.error : undefined,
-                revert: !isSuccess && "revert" in firstResult ? firstResult.revert : undefined,
-                gasUsed: firstResult?.gasUsed,
-              },
-            });
-
-            // If simulation failed, potentially abort
-            if (!isSuccess && "error" in firstResult) {
-              const abortOnSimFail = process.env.FLASHBOTS_ABORT_ON_SIMULATION_FAIL === "true";
-              if (abortOnSimFail) {
-                throw new Error(`Flashbots simulation failed: ${firstResult.error} - ${firstResult.revert}`);
-              }
-            }
-          }
-        } catch (simError) {
-          logger.warn({
-            at: "TxUtil#Flashbots",
-            message: "Flashbots simulation error (continuing with submission)",
-            error: stringifyThrownValue(simError),
-          });
-        }
-      }
-
-      // Step 3: Get and log Flashbots user stats before sending (mainnet only)
-      // Note: getUserStatsV2 is only available on mainnet relay, not Sepolia
-      if (chainId === 1) {
-        try {
-          const userStats = await flashbotsProvider.getUserStatsV2();
-          if ("error" in userStats) {
-            logger.warn({
-              at: "TxUtil#Flashbots",
-              message: "Flashbots user stats returned error",
-              error: userStats.error,
-              method,
-              hash: txHash,
-            });
-          } else {
-            logger.info({
-              at: "TxUtil#Flashbots",
-              message: "Flashbots user stats before submission",
-              stats: {
-                isHighPriority: userStats.isHighPriority,
-                allTimeValidatorPayments: userStats.allTimeValidatorPayments,
-                allTimeGasSimulated: userStats.allTimeGasSimulated,
-                last7dValidatorPayments: userStats.last7dValidatorPayments,
-                last7dGasSimulated: userStats.last7dGasSimulated,
-                last1dValidatorPayments: userStats.last1dValidatorPayments,
-                last1dGasSimulated: userStats.last1dGasSimulated,
-              },
-              method,
-              hash: txHash,
-            });
-          }
-        } catch (statsError) {
-          logger.warn({
-            at: "TxUtil#Flashbots",
-            message: "Failed to get Flashbots user stats",
-            error: stringifyThrownValue(statsError),
-            method,
-            hash: txHash,
-          });
-        }
-      }
-
-      // Step 4: Send the PRE-SIGNED transaction via Flashbots
-      const flashbotsResponse = await flashbotsProvider.sendPrivateTransaction(
-        {
-          signedTransaction: signedTx,
-        },
-        {
-          maxBlockNumber,
-        }
-      );
-
-      if (!txHash) {
-        throw new Error("Failed to get transaction hash from Flashbots submission");
-      }
-
-      // Check if response is an error
-      if ("error" in flashbotsResponse) {
-        logger.error({
-          at: "TxUtil#Flashbots",
-          message: "Flashbots relay returned error",
-          error: flashbotsResponse.error,
-          hash: txHash,
-        });
-        throw new Error(`Flashbots error: ${flashbotsResponse.error.message}`);
-      }
-
-      logger.info({
-        at: "TxUtil#Flashbots",
-        message: "Transaction submitted to Flashbots relay 🥷",
-        hash: txHash,
-        currentBlock: currentBlockNumber,
-        maxBlockNumber,
-        validForBlocks: maxBlockNumber - currentBlockNumber,
-        flashbotsResponse: {
-          account: flashbotsResponse.transaction.account,
-          nonce: flashbotsResponse.transaction.nonce,
-        },
-      });
-
-
-      let txReceipts: ethers.providers.TransactionReceipt[] | undefined;
-      // Step 4: Wait for transaction inclusion if env var is set
-      if (process.env.FLASHBOTS_WAIT === "true") {
-        try {
-          logger.debug({
-            at: "TxUtil#Flashbots",
-            message: "Waiting for Flashbots transaction resolution ...",
-            hash: txHash,
-            maxBlockNumber,
-          });
-
-          const resolution = await flashbotsResponse.wait();
-
-          logger.info({
-            at: "TxUtil#Flashbots",
-            message: "Flashbots transaction resolution",
-            hash: txHash,
-            resolution: resolution == FlashbotsTransactionResolution.TransactionIncluded ? "TxIncluded" : "TxDropped",
-          });
-          // FlashbotsTransactionResolution: TxIncluded = 0, TxDropped = 1 
-
-          // Get the actual transaction receipt
-          txReceipts = await flashbotsResponse.receipts();
-          if (txReceipts && txReceipts.length > 0) {
-            const receipt = txReceipts[0];
-            logger.info({
-              at: "TxUtil#Flashbots",
-              message: "Flashbots transaction mined ⛏️",
-              hash: txHash,
-              blockNumber: receipt.blockNumber,
-              status: receipt.status,
-              gasUsed: receipt.gasUsed.toString(),
-              effectiveGasPrice: receipt.effectiveGasPrice?.toString(),
-              includedInBlock: receipt.blockNumber - currentBlockNumber,
-            });
-          } else {
-            logger.warn({
-              at: "TxUtil#Flashbots",
-              message: "Flashbots transaction not mined within validity window",
-              hash: txHash,
-              resolution,
-              maxBlockNumber,
-              note: "Transaction may have been dropped or not competitive enough",
-            });
-          }
-        } catch (waitError) {
-          logger.warn({
-            at: "TxUtil#Flashbots",
-            message: "Error waiting for Flashbots transaction",
-            hash: txHash,
-            error: stringifyThrownValue(waitError),
-          });
-        }
-      }
-
-
-      // const targetBlockNumber = currentBlockNumber + 5;
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Simulating bundle",
-      //   targetBlockNumber: targetBlockNumber,
-      // });
-
-      // const signedTransactions = await flashbotsProvider.signBundle([
-      //   {
-      //     signer: contract.signer,
-      //     transaction: unsignedTx
-      //   },
-      // ])
-
-      // const simulation = await flashbotsProvider.simulate(signedTransactions, targetBlockNumber);
-
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Simulation result",
-      //   simulation: simulation,
-      // });
-
-      // const bundleResponse = await flashbotsProvider.sendBundle([{
-      //   signer: contract.signer,
-      //   transaction: unsignedTx,
-      // }
-      // ], targetBlockNumber)
-
-      // if ("error" in bundleResponse) {
-      //   throw new Error(`Flashbots bundle error: ${bundleResponse.error.message}`);
-      // }
-
-      // const txReceipt = bundleResponse.bundleTransactions ? bundleResponse.bundleTransactions[0] : undefined;
-
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Bundle sent",
-      //   bundleHash: bundleResponse.bundleHash,
-      //   TargetBlockNumber: targetBlockNumber,
-      //   TxAccount: txReceipt.account,
-      //   TxNonce: txReceipt.nonce,
-      //   TxHash: txReceipt.hash,
-      // });
-
-      // const waitResponse = await bundleResponse.wait()
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Bundle response received",
-      //   inclusion: waitResponse,
-      // });
-
-
-      // const bundleStats = await flashbotsProvider.getBundleStatsV2(bundleResponse.bundleHash, targetBlockNumber)
-
-      // if ("error" in bundleStats) {
-      //   throw new Error(`Flashbots bundle stats error: ${bundleStats.error.message}`);
-      // }
-
-      // const txHash = txReceipt ? txReceipt.transactionHash : undefined;
-
-
-
-      // logger.debug({
-      //   at: "TxUtil#Flashbots",
-      //   message: "Bundle stats",
-      //   bundleStats: bundleStats,
-      // });
-
-      const txReceipt = txReceipts ? txReceipts[0] : undefined;
-      // Return a TransactionResponse-like object using the Flashbots response
-      // This matches the standard path behavior where we return the result of contract[method]()
-      return {
-        hash: txHash,
-        from: await contract.signer.getAddress(),
-        nonce: flashbotsResponse.transaction.nonce,
-        gasLimit: unsignedTx.gasLimit,
-        gasPrice: unsignedTx.gasPrice,
-        data: unsignedTx.data,
-        value: unsignedTx.value,
-        chainId: unsignedTx.chainId,
-        confirmations: 0,
-        wait: async (confirmations?: number) => {
-          // Since we already have the receipt from Flashbots, return it directly
-          return txReceipt as any;
-        },
-      } as TransactionResponse
+    } else if (process.env.PRIVATE_TX_ENABLED && isMevShareSupportedChain(chainId)) {
+      // If private transaction is enabled and the chain is supported, submit the transaction via MEV-Share
+      const rawTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
+      // Note that only legacy transactions are supported  for now.
+      rawTx.type = 0;
+      const maxBlockNumber = (await provider.getBlockNumber()) + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
+      return await submitPrivateTransaction(logger, chainId, rawTx, contract.signer, provider, maxBlockNumber);
     } else {
-      // Standard path: Send transaction through public mempool
-      if (sendRawTransaction) {
-        // For legacy chains, ensure we're sending a legacy transaction
-        const rawTxConfig = LEGACY_TRANSACTION_CHAINS.includes(chainId)
-          ? { to: contract.address, value, ...gas, type: 0 }
-          : { to: contract.address, value, ...gas };
-
-        return await (await contract.signer).sendTransaction(rawTxConfig);
-      } else {
-        return await contract[method](...(args as Array<unknown>), txConfig);
-      }
+      return await contract[method](...(args as Array<unknown>), txConfig);
     }
   } catch (error) {
     if (retriesRemaining > 0 && txnRetryable(error)) {
@@ -702,11 +335,11 @@ export async function getGasPrice(
     message: "Oracle suggested gas prices",
     chainId: chainId,
     method: method,
-    depositId: depositId ? ethers.utils.formatUnits(depositId, "wei") : undefined,
+    depositId: ethers.utils.formatUnits(depositId, "wei"),
     baseFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas.sub(feeData.maxPriorityFeePerGas), "gwei"),
     maxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
     maxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
-    gasLimit: gasLimit ? ethers.utils.formatUnits(gasLimit, "wei") : undefined,
+    gasLimit: ethers.utils.formatUnits(gasLimit, "wei"),
     maxFeeScaler: maxFeePerGasScaler,
     priorityScaler: priorityScaler,
   });
@@ -731,7 +364,7 @@ export async function getGasPrice(
         message: "Enhanced gas price using legacy Tx",
         chainId: chainId,
         method: method,
-        depositId: depositId ? ethers.utils.formatUnits(depositId, "wei") : undefined,
+        depositId: ethers.utils.formatUnits(depositId, "wei"),
         estimatedGasPrice: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
         enhancedGasPrice: ethers.utils.formatUnits(enhancedGasPrice, "gwei"),
         gasLimit: ethers.utils.formatUnits(gasLimitForCalculation, "wei"),
@@ -760,7 +393,7 @@ export async function getGasPrice(
         message: "Enhanced gas prices using EIP-1559",
         chainId: chainId,
         method: method,
-        depositId: depositId ? ethers.utils.formatUnits(depositId, "wei") : undefined,
+        depositId: ethers.utils.formatUnits(depositId, "wei"),
         originalMaxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
         enhancedMaxFeePerGas: ethers.utils.formatUnits(enhancedGasPrice, "gwei"),
         originalMaxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
@@ -842,4 +475,166 @@ export function getTarget(targetAddress: string):
   } catch (error) {
     return { targetAddress };
   }
+}
+
+
+async function submitPrivateTransaction(
+  logger: winston.Logger,
+  chainId: number,
+  transaction: ethers.providers.TransactionRequest,
+  signer: ethers.Signer,
+  provider: ethers.providers.Provider,
+  maxBlockNumber?: number
+): Promise<TransactionResponse> {
+  const mevShareClient = await getMevShareClient(provider, chainId);
+  const signedTx = await signer.signTransaction(transaction);
+
+  // Parse the signed transaction to get the hash
+  const txHash = ethers.utils.parseTransaction(signedTx).hash;
+
+  // Create transaction options
+  const txOptions = createTransactionOptions(
+    createHintPreferences(),
+    maxBlockNumber,
+    getBuilders()
+  );
+
+  logger.info({
+    at: "TxUtil#submitPrivateTransaction",
+    message: "Submitting private transaction via MEV-Share",
+    chainId: chainId,
+    transaction: txHash,
+    hints: txOptions.hints,
+    signedTxLength: signedTx.length,
+    txOptions: txOptions,
+  });
+
+  // Log detailed transaction information for debugging
+  console.log("MEV-Share transaction details:", {
+    chainId: chainId,
+    txHash: txHash,
+    signedTx: signedTx,
+    signedTxLength: signedTx.length,
+    originalTransaction: {
+      to: transaction.to,
+      value: transaction.value,
+      gasLimit: transaction.gasLimit,
+      gasPrice: transaction.gasPrice,
+      maxFeePerGas: transaction.maxFeePerGas,
+      maxPriorityFeePerGas: transaction.maxPriorityFeePerGas,
+      nonce: transaction.nonce,
+      data: transaction.data,
+      type: transaction.type,
+      chainId: transaction.chainId
+    },
+    txOptions: txOptions
+  });
+
+  // Simulate the transaction before sending (if enabled)
+  if (process.env.MEV_SHARE_SIMULATE !== "false") {
+    try {
+      logger.info({
+        at: "TxUtil#submitPrivateTransaction",
+        message: "Simulating MEV-Share transaction",
+        chainId: chainId,
+        transaction: txHash,
+      });
+
+      // Also try MEV-Share bundle simulation if available
+      const bundleSimulation = await mevShareClient.simulateBundle({
+        transactions: [signedTx],
+        blockNumber: await provider.getBlockNumber(),
+      });
+
+      logger.info({
+        at: "TxUtil#submitPrivateTransaction",
+        message: "MEV-Share bundle simulation successful",
+        chainId: chainId,
+        transaction: txHash,
+        bundleSimulation: {
+          gasUsed: bundleSimulation.gasUsed,
+          gasFees: bundleSimulation.gasFees,
+          coinbaseDiff: bundleSimulation.coinbaseDiff,
+          totalCoinbaseDiff: bundleSimulation.totalCoinbaseDiff,
+          refundableValue: bundleSimulation.refundableValue,
+          gasPrice: bundleSimulation.gasPrice,
+        },
+      });
+    } catch (bundleSimError) {
+      logger.warn({
+        at: "TxUtil#submitPrivateTransaction",
+        message: "MEV-Share bundle simulation failed (this is optional)",
+        error: bundleSimError instanceof Error ? bundleSimError.message : String(bundleSimError),
+        chainId: chainId,
+        transaction: txHash,
+      });
+
+      // For now, we'll still try to send the transaction even if simulation fails
+      // In production, you might want to throw here to prevent sending failed transactions
+      logger.warn({
+        at: "TxUtil#submitPrivateTransaction",
+        message: "Proceeding with transaction despite simulation failure",
+        chainId: chainId,
+        transaction: txHash,
+      });
+    }
+  }
+
+  try {
+    // Send transaction via MEV-Share
+    const response = await mevShareClient.sendTransaction(signedTx, txOptions);
+
+    logger.info({
+      at: "TxUtil#submitPrivateTransaction",
+      message: "MEV-Share transaction sent successfully",
+      chainId: chainId,
+      transaction: txHash,
+      response: response,
+    });
+
+  } catch (error) {
+    logger.error({
+      at: "TxUtil#submitPrivateTransaction",
+      message: "MEV-Share transaction failed",
+      error: error instanceof Error ? error.message : String(error),
+      chainId: chainId,
+      transaction: txHash,
+    });
+    throw error;
+  }
+
+
+  logger.info({
+    at: "TxUtil#submitPrivateTransaction",
+    message: "Private transaction submitted to MEV-Share relay 🎭",
+    chainId: chainId,
+    transaction: txHash,
+    privacyLevel: {
+      logs: txOptions.hints.logs ? "shared" : "private",
+      calldata: txOptions.hints.calldata ? "shared" : "private",
+      functionSelector: txOptions.hints.functionSelector ? "shared" : "private",
+      contractAddress: txOptions.hints.contractAddress ? "shared" : "private",
+      txHash: txOptions.hints.txHash ? "shared" : "private",
+    },
+  });
+
+  // Return a TransactionResponse-like object
+  return {
+    hash: txHash,
+    from: await signer.getAddress(),
+    nonce: transaction.nonce,
+    gasLimit: transaction.gasLimit,
+    gasPrice: transaction.gasPrice,
+    maxFeePerGas: transaction.maxFeePerGas,
+    maxPriorityFeePerGas: transaction.maxPriorityFeePerGas,
+    data: transaction.data,
+    value: transaction.value,
+    chainId: transaction.chainId,
+    confirmations: 0,
+    wait: async (confirmations?: number) => {
+      // MEV-Share transactions are private until mined
+      // Use standard provider wait for confirmation
+      return provider.waitForTransaction(txHash, confirmations || 0);
+    },
+  } as TransactionResponse;
 }
