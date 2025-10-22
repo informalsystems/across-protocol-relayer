@@ -12,6 +12,7 @@ import {
   TransactionSimulationResult,
   willSucceed,
   stringifyThrownValue,
+  getProvider,
 } from "../utils";
 
 export interface AugmentedTransaction {
@@ -48,7 +49,7 @@ export class TransactionClient {
   readonly nonces: { [chainId: number]: number } = {};
 
   // eslint-disable-next-line no-useless-constructor
-  constructor(readonly logger: winston.Logger) {}
+  constructor(readonly logger: winston.Logger) { }
 
   protected _simulate(txn: AugmentedTransaction): Promise<TransactionSimulationResult> {
     return willSucceed(txn);
@@ -77,6 +78,110 @@ export class TransactionClient {
     );
   }
 
+  /**
+   * Wait for a transaction to be included in a specific block or any subsequent block
+   * @param txHash Transaction hash to wait for
+   * @param targetBlock Target block number to check
+   * @param chainId Chain ID for the transaction
+   * @returns Transaction receipt if found, null if not included by target block
+   */
+  private async waitForTransactionInBlock(
+    txHash: string,
+    targetBlock: number,
+    chainId: number
+  ): Promise<any> {
+    const provider = await getProvider(chainId);
+    const timeoutMs = Number(process.env.MEV_SHARE_CONFIRMATION_TIMEOUT) || 5 * 60 * 1000; // Default 5 minutes
+    const startTime = Date.now();
+
+    this.logger.debug({
+      at: "TransactionClient#waitForTransactionInBlock",
+      message: "Starting to wait for transaction inclusion",
+      transactionHash: txHash,
+      targetBlock: targetBlock,
+      timeoutMs: timeoutMs,
+    });
+
+    while (Date.now() - startTime < timeoutMs) {
+      try {
+        const currentBlock = await provider.getBlockNumber();
+
+        // If we've passed the target block, check if transaction was included
+        if (currentBlock >= targetBlock) {
+          this.logger.debug({
+            at: "TransactionClient#waitForTransactionInBlock",
+            message: "Target block reached, checking for transaction inclusion",
+            transactionHash: txHash,
+            currentBlock: currentBlock,
+            targetBlock: targetBlock,
+          });
+
+          // Check if transaction was included in any block up to current block
+          for (let blockNum = targetBlock; blockNum <= currentBlock; blockNum++) {
+            try {
+              const block = await provider.getBlockWithTransactions(blockNum);
+              const tx = block.transactions.find(t => t.hash === txHash);
+
+              if (tx) {
+                // Transaction found, get the receipt
+                const receipt = await provider.getTransactionReceipt(txHash);
+                this.logger.debug({
+                  at: "TransactionClient#waitForTransactionInBlock",
+                  message: "Transaction found in block",
+                  transactionHash: txHash,
+                  blockNumber: blockNum,
+                  status: receipt?.status,
+                });
+                return receipt;
+              }
+            } catch (blockError) {
+              // Block might not exist yet, continue
+              this.logger.debug({
+                at: "TransactionClient#waitForTransactionInBlock",
+                message: "Block not found, continuing",
+                blockNumber: blockNum,
+                error: stringifyThrownValue(blockError),
+              });
+            }
+          }
+
+          // Transaction not found in any block up to current block
+          this.logger.warn({
+            at: "TransactionClient#waitForTransactionInBlock",
+            message: "Transaction not included by target block - did not land on-chain",
+            transactionHash: txHash,
+            targetBlock: targetBlock,
+            currentBlock: currentBlock,
+          });
+          return null;
+        }
+
+        // Wait a bit before checking again
+        await new Promise(resolve => setTimeout(resolve, 2000)); // Wait 2 seconds
+
+      } catch (error) {
+        this.logger.warn({
+          at: "TransactionClient#waitForTransactionInBlock",
+          message: "Error while waiting for transaction inclusion",
+          transactionHash: txHash,
+          error: stringifyThrownValue(error),
+        });
+        await new Promise(resolve => setTimeout(resolve, 5000)); // Wait 5 seconds on error
+      }
+    }
+
+    // Timeout reached
+    this.logger.warn({
+      at: "TransactionClient#waitForTransactionInBlock",
+      message: "Timeout waiting for transaction inclusion",
+      transactionHash: txHash,
+      targetBlock: targetBlock,
+      timeoutMs: timeoutMs,
+    });
+
+    throw new Error(`Transaction inclusion timeout after ${timeoutMs / 1000} seconds`);
+  }
+
   async submit(chainId: number, txns: AugmentedTransaction[]): Promise<TransactionResponse[]> {
     const networkName = getNetworkName(chainId);
     const txnResponses: TransactionResponse[] = [];
@@ -98,6 +203,15 @@ export class TransactionClient {
 
       const nonce = this.nonces[chainId] ? this.nonces[chainId] + 1 : undefined;
 
+      this.logger.debug({
+        at: "TransactionClient#submit",
+        message: "Nonce calculation for transaction",
+        chainId: chainId,
+        currentNonce: this.nonces[chainId],
+        calculatedNonce: nonce,
+        transactionIndex: idx + 1,
+      });
+
       // @dev It's assumed that nobody ever wants to discount the gasLimit.
       const gasLimitMultiplier = txn.gasLimitMultiplier ?? DEFAULT_GASLIMIT_MULTIPLIER;
       if (gasLimitMultiplier > DEFAULT_GASLIMIT_MULTIPLIER) {
@@ -114,7 +228,6 @@ export class TransactionClient {
       try {
         response = await this._submit(txn, nonce);
       } catch (error) {
-        delete this.nonces[chainId];
         this.logger.info({
           at: "TransactionClient#submit",
           message: `Transaction ${idx + 1} submission on ${networkName} failed or timed out.`,
@@ -124,10 +237,81 @@ export class TransactionClient {
           error: stringifyThrownValue(error),
           notificationPath: "across-error",
         });
+        // Nonce was not consumed, so prepare to decrement the nonce for the next transaction
+        // Should be safe to decrement for both MEV-share and standard transactions
+        // TODO: verify if it's not the first transaction on the chain
+        this.nonces[chainId] = response.nonce - 1;
         return txnResponses;
       }
 
-      this.nonces[chainId] = response.nonce;
+      // Special handling for MEV-Share transactions
+      // Only increment nonce if the transaction is actually included in a block
+      if ((response as any)._mevShareTransaction) {
+        this.logger.debug({
+          at: "TransactionClient#submit",
+          message: "MEV-Share transaction submitted, waiting for inclusion before updating nonce",
+          transactionHash: response.hash,
+        });
+
+        // For MEV-Share transactions, we need to wait for inclusion before updating nonce
+        // This prevents nonce issues when transactions fail simulation or don't get included
+        try {
+          // Use the target block number from the MEV-Share transaction response
+          const targetBlock = (response as any)._mevShareTargetBlock;
+
+          if (!targetBlock) {
+            throw new Error("MEV-Share transaction missing target block number");
+          }
+
+          this.logger.debug({
+            at: "TransactionClient#submit",
+            message: "Waiting for MEV-Share transaction inclusion at target block",
+            transactionHash: response.hash,
+            targetBlock: targetBlock,
+          });
+
+          // Wait for the target block to be mined, then check for inclusion
+          const receipt = await this.waitForTransactionInBlock(response.hash, targetBlock, chainId);
+
+          if (receipt && receipt.status === 1) {
+            // Transaction was successfully included, update nonce
+            this.nonces[chainId] = response.nonce;
+            this.logger.debug({
+              at: "TransactionClient#submit",
+              message: "MEV-Share transaction confirmed, nonce updated",
+              transactionHash: response.hash,
+              nonce: response.nonce,
+              blockNumber: receipt.blockNumber,
+            });
+          } else {
+            // Transaction did not land on-chain, nonce was not consumed
+            this.logger.warn({
+              at: "TransactionClient#submit",
+              message: "MEV-Share transaction did not land on-chain, nonce not updated (not consumed)",
+              transactionHash: response.hash,
+              targetBlock: targetBlock,
+              nonce: response.nonce,
+            });
+            // Nonce was not consumed, so prepare to decrement the nonce for the next transaction
+            this.nonces[chainId] = response.nonce - 1;
+            return txnResponses;
+          }
+        } catch (waitError) {
+          // If waiting fails, don't update nonce to be safe
+          this.logger.warn({
+            at: "TransactionClient#submit",
+            message: "MEV-Share transaction wait failed, nonce not updated",
+            transactionHash: response.hash,
+            error: stringifyThrownValue(waitError),
+          });
+          // Nonce was not consumed, so prepare to decrement the nonce for the next transaction
+          this.nonces[chainId] = response.nonce - 1;
+          return txnResponses;
+        }
+      } else {
+        // Standard transaction, update nonce immediately
+        this.nonces[chainId] = response.nonce;
+      }
       const blockExplorer = blockExplorerLink(response.hash, txn.chainId);
       mrkdwn += `  ${idx + 1}. ${txn.message || "No message"} (${blockExplorer}): ${txn.mrkdwn || "No markdown"}\n`;
       txnResponses.push(response);

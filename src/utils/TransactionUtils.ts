@@ -29,6 +29,7 @@ import {
   signTransactionMessageWithSigners,
   type Blockhash,
 } from "@solana/kit";
+import { BundleParams } from "@flashbots/mev-share-client";
 
 dotenv.config();
 
@@ -110,6 +111,8 @@ export async function runTransaction(
   const { provider } = contract;
   const { chainId } = await provider.getNetwork();
 
+
+  // Reset nonce once per chain during the runtime of the script
   if (!nonceReset[chainId]) {
     nonce = await provider.getTransactionCount(await contract.signer.getAddress());
     nonceReset[chainId] = true;
@@ -124,6 +127,11 @@ export async function runTransaction(
     const maxFeePerGasScaler =
       Number(process.env[`MAX_FEE_PER_GAS_SCALER_${chainId}`] || process.env.MAX_FEE_PER_GAS_SCALER) ||
       DEFAULT_GAS_FEE_SCALERS[chainId]?.maxFeePerGasScaler;
+
+    // Hardcode gas limit to 200000 for MEV-Share transactions
+    // if (process.env.PRIVATE_TX_ENABLED && isMevShareSupportedChain(chainId)) {
+    //   gasLimit = BigNumber.from(200000);
+    // }
 
 
     // TODO: check async calls are getting resolved in the correct order
@@ -148,6 +156,11 @@ export async function runTransaction(
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
       // For legacy chains ensure only gasPrice is present
       gas = { gasPrice: gas.gasPrice || gas.maxFeePerGas };
+      // Legacy transaction gas price multiplier
+      const gasMultiplier = ethers.utils.parseUnits(process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER || "1", 1).div(ethers.utils.parseUnits("1", 1));
+      gas.gasPrice = gas.gasPrice?.mul(gasMultiplier);
+      // Only used to send tx - enhanced gas price still use estimated gas limit from oracle  
+      gasLimit = BigNumber.from(process.env.LEGACY_TRANSACTION_GAS_LIMIT || "200000");
     } else {
       // If the priority fee was overridden by the min/floor value, the base fee must be scaled up as well.
       const maxPriorityFeePerGas = sdkUtils.bnMax(gas.maxPriorityFeePerGas, flooredPriorityFeePerGas);
@@ -167,6 +180,7 @@ export async function runTransaction(
       value,
       nonce,
       gas,
+      gasMultiplier: process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER || "1",
       flooredPriorityFeePerGas,
       gasLimit,
       priorityFeeScaler,
@@ -193,14 +207,18 @@ export async function runTransaction(
         ? { to: contract.address, value, ...gas, type: 0 }
         : { to: contract.address, value, ...gas };
       return await (await contract.signer).sendTransaction(rawTxConfig);
-
-    } else if (process.env.PRIVATE_TX_ENABLED && isMevShareSupportedChain(chainId)) {
+    } else if (process.env.PRIVATE_TX_ENABLED === "true" && isMevShareSupportedChain(chainId)) {
       // If private transaction is enabled and the chain is supported, submit the transaction via MEV-Share
       const rawTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
       // Note that only legacy transactions are supported  for now.
       rawTx.type = 0;
-      const maxBlockNumber = (await provider.getBlockNumber()) + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
-      return await submitPrivateTransaction(logger, chainId, rawTx, contract.signer, provider, maxBlockNumber);
+      return await submitPrivateTransaction(logger, chainId, rawTx, contract.signer, provider);
+    } else if (process.env.MEV_SHARE_BUNDLE_ENABLED === "true" && isMevShareSupportedChain(chainId)) {
+      // If private transaction is enabled and the chain is supported, submit the transaction via MEV-Share
+      const rawTx = await contract.populateTransaction[method](...(args as Array<unknown>), txConfig);
+      // Note that only legacy transactions are supported  for now.
+      rawTx.type = 0;
+      return await submitBundle(logger, chainId, rawTx, contract.signer, provider);
     } else {
       return await contract[method](...(args as Array<unknown>), txConfig);
     }
@@ -484,8 +502,11 @@ async function submitPrivateTransaction(
   transaction: ethers.providers.TransactionRequest,
   signer: ethers.Signer,
   provider: ethers.providers.Provider,
-  maxBlockNumber?: number
 ): Promise<TransactionResponse> {
+
+  const currentBlockNumber = await provider.getBlockNumber();
+  const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
+
   const mevShareClient = await getMevShareClient(provider, chainId);
   const signedTx = await signer.signTransaction(transaction);
 
@@ -494,9 +515,9 @@ async function submitPrivateTransaction(
 
   // Create transaction options
   const txOptions = createTransactionOptions(
-    createHintPreferences(),
     maxBlockNumber,
-    getBuilders()
+    //   getBuilders() // Flashbots sends transactions to all builders by default
+    // createHintPreferences(),
   );
 
   logger.info({
@@ -506,15 +527,8 @@ async function submitPrivateTransaction(
     transaction: txHash,
     hints: txOptions.hints,
     signedTxLength: signedTx.length,
+    currentBlockNumber: currentBlockNumber,
     txOptions: txOptions,
-  });
-
-  // Log detailed transaction information for debugging
-  console.log("MEV-Share transaction details:", {
-    chainId: chainId,
-    txHash: txHash,
-    signedTx: signedTx,
-    signedTxLength: signedTx.length,
     originalTransaction: {
       to: transaction.to,
       value: transaction.value,
@@ -527,7 +541,6 @@ async function submitPrivateTransaction(
       type: transaction.type,
       chainId: transaction.chainId
     },
-    txOptions: txOptions
   });
 
   // Simulate the transaction before sending (if enabled)
@@ -583,7 +596,6 @@ async function submitPrivateTransaction(
   try {
     // Send transaction via MEV-Share
     const response = await mevShareClient.sendTransaction(signedTx, txOptions);
-
     logger.info({
       at: "TxUtil#submitPrivateTransaction",
       message: "MEV-Share transaction sent successfully",
@@ -609,16 +621,12 @@ async function submitPrivateTransaction(
     message: "Private transaction submitted to MEV-Share relay 🎭",
     chainId: chainId,
     transaction: txHash,
-    privacyLevel: {
-      logs: txOptions.hints.logs ? "shared" : "private",
-      calldata: txOptions.hints.calldata ? "shared" : "private",
-      functionSelector: txOptions.hints.functionSelector ? "shared" : "private",
-      contractAddress: txOptions.hints.contractAddress ? "shared" : "private",
-      txHash: txOptions.hints.txHash ? "shared" : "private",
-    },
+    txOptions: txOptions,
   });
 
   // Return a TransactionResponse-like object
+  // Note: For MEV-Share transactions, we need to be careful about nonce management
+  // since failed simulations or non-inclusion don't consume the nonce
   return {
     hash: txHash,
     from: await signer.getAddress(),
@@ -636,5 +644,134 @@ async function submitPrivateTransaction(
       // Use standard provider wait for confirmation
       return provider.waitForTransaction(txHash, confirmations || 0);
     },
-  } as TransactionResponse;
+    // Add a flag to indicate this is a MEV-Share transaction for special handling
+    _mevShareTransaction: true,
+    // Pass along the target block number used in the MEV-Share transaction
+    _mevShareTargetBlock: maxBlockNumber,
+  } as TransactionResponse & { _mevShareTransaction?: boolean; _mevShareTargetBlock?: number };
+}
+
+async function submitBundle(
+  logger: winston.Logger,
+  chainId: number,
+  transaction: ethers.providers.TransactionRequest,
+  signer: ethers.Signer,
+  provider: ethers.providers.Provider,
+): Promise<TransactionResponse> {
+  const mevShareClient = await getMevShareClient(provider, chainId);
+  const signedTx = await signer.signTransaction(transaction);
+  // Parse the signed transaction to get the hash
+  const txHash = ethers.utils.parseTransaction(signedTx).hash;
+
+  const bundle = [
+    { tx: signedTx, canRevert: false },
+  ]
+
+  const currentBlockNumber = await provider.getBlockNumber();
+  const targetBlock = currentBlockNumber + 1;
+  const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
+
+
+  const bundleParams: BundleParams = {
+    inclusion: {
+      block: targetBlock,
+      maxBlock: maxBlockNumber,
+    },
+    body: bundle,
+    privacy: {
+      hints: {
+        txHash: false,
+        calldata: false,
+        logs: false,
+        functionSelector: true,
+        contractAddress: true,
+      },
+      builders: getBuilders()
+    }
+  }
+
+
+  if (process.env.MEV_SHARE_SIMULATE !== "false") {
+    try {
+      logger.info({
+        at: "TxUtil#submitPrivateTransaction",
+        message: "Simulating MEV-Share bundle",
+        chainId: chainId,
+        currentBlockNumber: currentBlockNumber,
+        maxBlockNumber: maxBlockNumber,
+        txHash: txHash,
+        transaction: transaction,
+      });
+
+      const simOptions = {
+        parentBlock: currentBlockNumber - 1,
+      }
+      const bundleSimulation = await mevShareClient.simulateBundle(bundleParams, simOptions);
+
+      logger.info({
+        at: "TxUtil#submitBundle",
+        message: "Bundle simulation successful",
+        transaction: txHash,
+        currentBlockNumber: currentBlockNumber,
+        maxBlockNumber: maxBlockNumber,
+        chainId: chainId,
+        bundleSimulation: bundleSimulation,
+      });
+    } catch (bundleSimError) {
+      logger.warn({
+        at: "TxUtil#submitBundle",
+        message: "MEV-Share bundle simulation failed (this is optional)",
+        error: bundleSimError instanceof Error ? bundleSimError.message : String(bundleSimError),
+        transaction: txHash,
+        chainId: chainId,
+        currentBlockNumber: currentBlockNumber,
+        maxBlockNumber: maxBlockNumber,
+      });
+    }
+  }
+
+  try {
+    const response = await mevShareClient.sendBundle(bundleParams);
+    logger.info({
+      at: "TxUtil#submitBundle",
+      message: "Bundle sent successfully",
+      chainId: chainId,
+      response: response,
+      transaction: txHash,
+      currentBlockNumber: currentBlockNumber,
+      maxBlockNumber: maxBlockNumber,
+    });
+  } catch (bundleSendError) {
+    logger.error({
+      at: "TxUtil#submitBundle",
+      message: "MEV-Share bundle send failed",
+      error: bundleSendError instanceof Error ? bundleSendError.message : String(bundleSendError),
+      chainId: chainId,
+      transaction: txHash,
+    });
+    throw bundleSendError;
+  }
+
+
+  return {
+    hash: txHash,
+    from: await signer.getAddress(),
+    nonce: transaction.nonce,
+    gasLimit: transaction.gasLimit,
+    gasPrice: transaction.gasPrice,
+    maxFeePerGas: transaction.maxFeePerGas,
+    maxPriorityFeePerGas: transaction.maxPriorityFeePerGas,
+    data: transaction.data,
+    value: transaction.value,
+    chainId: transaction.chainId,
+    wait: async (confirmations?: number) => {
+      // MEV-Share bundles are private until mined
+      // Use standard provider wait for confirmation
+      return provider.waitForTransaction(txHash, confirmations || 0);
+    },
+    // Add a flag to indicate this is a MEV-Share bundle for special handling
+    _mevShareTransaction: true,
+    // Pass along the target block number used in the MEV-Share transaction
+    _mevShareTargetBlock: maxBlockNumber,
+  } as TransactionResponse & { _mevShareTransaction?: boolean; _mevShareTargetBlock?: number };
 }

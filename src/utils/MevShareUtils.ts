@@ -61,68 +61,63 @@ export async function getMevShareClient(
         });
 
         // Create MEV-Share client with official network configuration
-        console.log("Creating MEV-Share client instance...");
-        const mevShareClient = new MevShareClient(wallet, {
-            streamUrl: network.streamUrl,
-            apiUrl: network.apiUrl,
-        });
-        console.log("MEV-Share client created successfully");
+        const mevShareClient = new MevShareClient(wallet, network);
 
-        // Add debugging to the client's sendTransaction method
-        const originalSendTransaction = mevShareClient.sendTransaction.bind(mevShareClient);
-        mevShareClient.sendTransaction = async (signedTx: string, options: any) => {
-            console.log("MEV-Share sendTransaction called with:", {
-                signedTx: signedTx.substring(0, 100) + "...",
-                signedTxLength: signedTx.length,
-                options: JSON.stringify(options, null, 2),
-                walletAddress: wallet.address,
-                chainId: chainId
-            });
+        // // Add debugging to the client's sendTransaction method
+        // const originalSendTransaction = mevShareClient.sendTransaction.bind(mevShareClient);
+        // mevShareClient.sendTransaction = async (signedTx: string, options: any) => {
+        //     console.log("MEV-Share sendTransaction called with:", {
+        //         signedTx: signedTx.substring(0, 100) + "...",
+        //         signedTxLength: signedTx.length,
+        //         options: JSON.stringify(options, null, 2),
+        //         walletAddress: wallet.address,
+        //         chainId: chainId
+        //     });
 
-            try {
-                const result = await originalSendTransaction(signedTx, options);
-                console.log("MEV-Share sendTransaction result:", result);
-                return result;
-            } catch (error) {
-                console.error("MEV-Share sendTransaction error:", {
-                    error: error instanceof Error ? error.message : String(error),
-                    stack: error instanceof Error ? error.stack : undefined,
-                    signedTx: signedTx.substring(0, 100) + "...",
-                    options: JSON.stringify(options, null, 2)
-                });
-                throw error;
-            }
-        };
+        //     try {
+        //         const result = await originalSendTransaction(signedTx, options);
+        //         console.log("MEV-Share sendTransaction result:", result);
+        //         return result;
+        //     } catch (error) {
+        //         console.error("MEV-Share sendTransaction error:", {
+        //             error: error instanceof Error ? error.message : String(error),
+        //             stack: error instanceof Error ? error.stack : undefined,
+        //             signedTx: signedTx.substring(0, 100) + "...",
+        //             options: JSON.stringify(options, null, 2)
+        //         });
+        //         throw error;
+        //     }
+        // };
 
-        // Add debugging to intercept HTTP requests
-        const axios = require('axios');
-        const originalAxiosPost = axios.post;
-        axios.post = async (url: string, data: any, config: any) => {
-            console.log("MEV-Share HTTP POST request:", {
-                url: url,
-                data: JSON.stringify(data, null, 2),
-                headers: config?.headers,
-                config: config
-            });
+        // // Add debugging to intercept HTTP requests
+        // const axios = require('axios');
+        // const originalAxiosPost = axios.post;
+        // axios.post = async (url: string, data: any, config: any) => {
+        //     console.log("MEV-Share HTTP POST request:", {
+        //         url: url,
+        //         data: JSON.stringify(data, null, 2),
+        //         headers: config?.headers,
+        //         config: config
+        //     });
 
-            try {
-                const result = await originalAxiosPost(url, data, config);
-                console.log("MEV-Share HTTP POST response:", {
-                    status: result.status,
-                    statusText: result.statusText,
-                    data: result.data
-                });
-                return result;
-            } catch (error) {
-                console.error("MEV-Share HTTP POST error:", {
-                    error: error instanceof Error ? error.message : String(error),
-                    response: (error as any)?.response?.data,
-                    status: (error as any)?.response?.status,
-                    statusText: (error as any)?.response?.statusText
-                });
-                throw error;
-            }
-        };
+        //     try {
+        //         const result = await originalAxiosPost(url, data, config);
+        //         console.log("MEV-Share HTTP POST response:", {
+        //             status: result.status,
+        //             statusText: result.statusText,
+        //             data: result.data
+        //         });
+        //         return result;
+        //     } catch (error) {
+        //         console.error("MEV-Share HTTP POST error:", {
+        //             error: error instanceof Error ? error.message : String(error),
+        //             response: (error as any)?.response?.data,
+        //             status: (error as any)?.response?.status,
+        //             statusText: (error as any)?.response?.statusText
+        //         });
+        //         throw error;
+        //     }
+        // };
 
         return mevShareClient;
     } catch (error) {
@@ -131,11 +126,11 @@ export async function getMevShareClient(
 }
 
 export function createHintPreferences(
-    logs: boolean = true,
+    logs: boolean = false,
     calldata: boolean = false,
     functionSelector: boolean = true,
     contractAddress: boolean = true,
-    txHash: boolean = false
+    txHash: boolean = false,
 ): HintPreferences {
     return {
         logs,
@@ -147,14 +142,14 @@ export function createHintPreferences(
 }
 
 export function createTransactionOptions(
-    hints: HintPreferences,
-    maxBlockNumber?: number,
-    builders: string[] = ["flashbots"]
+    maxBlockNumber: number,
+    builders?: string[],
+    hints?: HintPreferences
 ): TransactionOptions {
     return {
-        hints,
         maxBlockNumber,
         builders,
+        hints
     };
 }
 
@@ -181,7 +176,7 @@ export function logMevShareSubmission(
 }
 
 export function getBuilders(): string[] {
-    return ["flashbots", "beaverbuild.org", "rsync", "Titan"];
+    return ["flashbots", "beaverbuild.org", "rsync", "Titan", "EigenPhi", "Quasar"];
 }
 
 export { Wallet };
