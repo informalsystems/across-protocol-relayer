@@ -172,11 +172,11 @@ async function getRelayerQuote(
 
 
     const quoteData = {
-      totalRelayFee: { total: "254792032367" },
+      totalRelayFee: { total: "2547920323677" },
       exclusiveRelayer: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      exclusivityDeadline: String(Math.floor(Date.now() / 1000) + 120),
+      exclusivityDeadline: String(Math.floor(Date.now() / 1000) + 300),
       timestamp: String(Math.floor(Date.now() / 1000)),
-      fillDeadline: String(Math.floor(Date.now() / 1000) + 120),
+      fillDeadline: String(Math.floor(Date.now() / 1000) + 300),
       estimatedFillTimeSec: 9,
     };
 
@@ -214,19 +214,19 @@ async function getRelayerQuote(
   let exclusivityDeadline: number;
   let quoteTimestamp: number;
   let fillDeadline: number;
-  do {
-    let totalRelayFee: BigNumber;
-    let estimatedFillTime: number;
-    ({ totalRelayFee, exclusivityDeadline, exclusiveRelayer, quoteTimestamp, estimatedFillTime, fillDeadline } =
-      await suggestedFees());
+  // do {
+  let totalRelayFee: BigNumber;
+  let estimatedFillTime: number;
+  ({ totalRelayFee, exclusivityDeadline, exclusiveRelayer, quoteTimestamp, estimatedFillTime, fillDeadline } =
+    await suggestedFees());
 
-    outputAmount = amount.sub(totalRelayFee);
-    const quote =
-      `Quote for ${tokenFormatter(amount)} ${token.symbol} ${fromChainId} -> ${toChainId}:` +
-      ` ${formatFeePct(totalRelayFee)} ${token.symbol} (${formatFeePct(totalRelayFee.mul(fixedPoint).div(amount))} %)` +
-      ` (ETA ${estimatedFillTime} s)`;
-    quoteAccepted = await utils.askYesNoQuestion(quote);
-  } while (!quoteAccepted);
+  outputAmount = amount.sub(totalRelayFee);
+  const quote =
+    `Quote for ${tokenFormatter(amount)} ${token.symbol} ${fromChainId} -> ${toChainId}:` +
+    ` ${formatFeePct(totalRelayFee)} ${token.symbol} (${formatFeePct(totalRelayFee.mul(fixedPoint).div(amount))} %)` +
+    ` (ETA ${estimatedFillTime} s)`;
+  //   quoteAccepted = await utils.askYesNoQuestion(quote);
+  // } while (!quoteAccepted);
 
   return { outputAmount, exclusiveRelayer, exclusivityDeadline, quoteTimestamp, fillDeadline };
 }
@@ -290,7 +290,7 @@ async function deposit(args: Record<string, number | string>, signer: Signer): P
     toBytes32(depositor),
     recipientAddress.toBytes32(),
     toBytes32(token.address),
-    toBytes32(AddressZero), // outputToken
+    toBytes32("0xfff9976782d46cc05630d1f6ebab18b2324d6b14"), // outputToken
     amount,
     depositQuote.outputAmount,
     toChainId,
@@ -304,9 +304,11 @@ async function deposit(args: Record<string, number | string>, signer: Signer): P
   console.log(`Submitting ${tokenSymbol} deposit on ${network}: ${transactionHash}.`);
   const receipt = await deposit.wait();
 
-  receipt.logs
-    .filter((log) => log.address === spokePool.address)
-    .forEach((log) => printDeposit(fromChainId, spokePool.interface.parseLog(log)));
+  console.log("receipt", receipt);
+
+  // receipt.logs
+  //   .filter((log) => log.address === spokePool.address)
+  //   .forEach((log) => printDeposit(fromChainId, spokePool.interface.parseLog(log)));
 
   return true;
 }

@@ -2,7 +2,7 @@ import { ethers, Wallet } from "ethers";
 import { winston } from "../utils";
 
 // Import MEV-Share client with proper default import
-import MevShareClientModule from "@flashbots/mev-share-client";
+import MevShareClientModule, { BundleParams } from "@flashbots/mev-share-client";
 const MevShareClient = (MevShareClientModule as any).default || MevShareClientModule;
 
 import { TransactionOptions, HintPreferences } from "@flashbots/mev-share-client";
@@ -125,6 +125,37 @@ export async function getMevShareClient(
     }
 }
 
+export async function getBundleParams(
+    signedTx: string,
+    currentBlockNumber: number,
+    hints?: HintPreferences,
+): Promise<BundleParams> {
+    const targetBlock = currentBlockNumber + 1;
+    const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
+
+    const bundle = [
+        { tx: signedTx, canRevert: false },
+    ]
+
+    return {
+        inclusion: {
+            block: targetBlock,
+            maxBlock: maxBlockNumber,
+        },
+        body: bundle,
+        privacy: {
+            hints: {
+                txHash: false,
+                calldata: false,
+                logs: false,
+                functionSelector: true,
+                contractAddress: true,
+            },
+            builders: getBuilders()
+        }
+    }
+}
+
 export function createHintPreferences(
     logs: boolean = false,
     calldata: boolean = false,
@@ -176,7 +207,7 @@ export function logMevShareSubmission(
 }
 
 export function getBuilders(): string[] {
-    return ["flashbots", "beaverbuild.org", "rsync", "Titan", "EigenPhi", "Quasar"];
+    return ["flashbots", "beaverbuild.org", "rsync", "Titan", "EigenPhi", "Quasar", "BTCS", "penguinbuild"];
 }
 
 export { Wallet };

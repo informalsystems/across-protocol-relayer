@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { AugmentedTransaction } from "../clients";
 import { DEFAULT_GAS_FEE_SCALERS } from "../common";
 import { EthersError } from "../interfaces";
-import { createHintPreferences, createTransactionOptions, getBuilders, getMevShareClient, isMevShareSupportedChain, Wallet } from "./MevShareUtils";
+import { createHintPreferences, createTransactionOptions, getBuilders, getMevShareClient, isMevShareSupportedChain, Wallet, getBundleParams } from "./MevShareUtils";
 import {
   BigNumber,
   bnZero,
@@ -120,18 +120,24 @@ export async function runTransaction(
 
   const sendRawTransaction = method === "";
 
+  if (process.env.MEV_SHARE_SIMULATE !== "false") {
+    // If private transaction is enabled and the chain is supported, submit the transaction via MEV-Share
+    const rawTx = await contract.populateTransaction[method](...(args as Array<unknown>),
+      { nonce: nonce, type: 0, gasPrice: 2000000, gasLimit: 200000 }); // Default gas limit and gas price if not specified
+    const bundleSimulation = await simulateBundle(logger, chainId, rawTx, contract.signer, provider);
+    // Update the gas limit with the bundle simulation gas limit as it has proven better accuracy
+    gasLimit = BigNumber.from(bundleSimulation.gasUsed);
+  }
+
+
   try {
+    // Scalers must be set to 1 
     const priorityFeeScaler =
       Number(process.env[`PRIORITY_FEE_SCALER_${chainId}`] || process.env.PRIORITY_FEE_SCALER) ||
       DEFAULT_GAS_FEE_SCALERS[chainId]?.maxPriorityFeePerGasScaler;
     const maxFeePerGasScaler =
       Number(process.env[`MAX_FEE_PER_GAS_SCALER_${chainId}`] || process.env.MAX_FEE_PER_GAS_SCALER) ||
       DEFAULT_GAS_FEE_SCALERS[chainId]?.maxFeePerGasScaler;
-
-    // Hardcode gas limit to 200000 for MEV-Share transactions
-    // if (process.env.PRIVATE_TX_ENABLED && isMevShareSupportedChain(chainId)) {
-    //   gasLimit = BigNumber.from(200000);
-    // }
 
 
     // TODO: check async calls are getting resolved in the correct order
@@ -449,7 +455,6 @@ export async function willSucceed(transaction: AugmentedTransaction): Promise<Tr
     return { transaction, succeed: true };
   }
 
-  const timeNow = Date.now();
   const { contract, method } = transaction;
   const args = transaction.value ? [...transaction.args, { value: transaction.value }] : transaction.args;
 
@@ -516,32 +521,10 @@ async function submitPrivateTransaction(
   // Create transaction options
   const txOptions = createTransactionOptions(
     maxBlockNumber,
-    //   getBuilders() // Flashbots sends transactions to all builders by default
-    // createHintPreferences(),
+    getBuilders(), // Flashbots sends transactions to all builders by default
+    createHintPreferences(false, false, true, true, false),
   );
 
-  logger.info({
-    at: "TxUtil#submitPrivateTransaction",
-    message: "Submitting private transaction via MEV-Share",
-    chainId: chainId,
-    transaction: txHash,
-    hints: txOptions.hints,
-    signedTxLength: signedTx.length,
-    currentBlockNumber: currentBlockNumber,
-    txOptions: txOptions,
-    originalTransaction: {
-      to: transaction.to,
-      value: transaction.value,
-      gasLimit: transaction.gasLimit,
-      gasPrice: transaction.gasPrice,
-      maxFeePerGas: transaction.maxFeePerGas,
-      maxPriorityFeePerGas: transaction.maxPriorityFeePerGas,
-      nonce: transaction.nonce,
-      data: transaction.data,
-      type: transaction.type,
-      chainId: transaction.chainId
-    },
-  });
 
   // Simulate the transaction before sending (if enabled)
   if (process.env.MEV_SHARE_SIMULATE !== "false") {
@@ -595,6 +578,29 @@ async function submitPrivateTransaction(
 
   try {
     // Send transaction via MEV-Share
+    logger.info({
+      at: "TxUtil#submitPrivateTransaction",
+      message: "Submitting private transaction via MEV-Share",
+      chainId: chainId,
+      transaction: txHash,
+      hints: txOptions.hints,
+      signedTxLength: signedTx.length,
+      currentBlockNumber: currentBlockNumber,
+      txOptions: txOptions,
+      originalTransaction: {
+        to: transaction.to,
+        value: transaction.value,
+        gasLimit: transaction.gasLimit,
+        gasPrice: transaction.gasPrice,
+        maxFeePerGas: transaction.maxFeePerGas,
+        maxPriorityFeePerGas: transaction.maxPriorityFeePerGas,
+        nonce: transaction.nonce,
+        data: transaction.data,
+        type: transaction.type,
+        chainId: transaction.chainId
+      },
+    });
+
     const response = await mevShareClient.sendTransaction(signedTx, txOptions);
     logger.info({
       at: "TxUtil#submitPrivateTransaction",
@@ -667,70 +673,36 @@ async function submitBundle(
     { tx: signedTx, canRevert: false },
   ]
 
+
   const currentBlockNumber = await provider.getBlockNumber();
-  const targetBlock = currentBlockNumber + 1;
-  const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
-
-
-  const bundleParams: BundleParams = {
-    inclusion: {
-      block: targetBlock,
-      maxBlock: maxBlockNumber,
-    },
-    body: bundle,
-    privacy: {
-      hints: {
-        txHash: false,
-        calldata: false,
-        logs: false,
-        functionSelector: true,
-        contractAddress: true,
-      },
-      builders: getBuilders()
-    }
-  }
-
-
-  if (process.env.MEV_SHARE_SIMULATE !== "false") {
-    try {
-      logger.info({
-        at: "TxUtil#submitPrivateTransaction",
-        message: "Simulating MEV-Share bundle",
-        chainId: chainId,
-        currentBlockNumber: currentBlockNumber,
-        maxBlockNumber: maxBlockNumber,
-        txHash: txHash,
-        transaction: transaction,
-      });
-
-      const simOptions = {
-        parentBlock: currentBlockNumber - 1,
-      }
-      const bundleSimulation = await mevShareClient.simulateBundle(bundleParams, simOptions);
-
-      logger.info({
-        at: "TxUtil#submitBundle",
-        message: "Bundle simulation successful",
-        transaction: txHash,
-        currentBlockNumber: currentBlockNumber,
-        maxBlockNumber: maxBlockNumber,
-        chainId: chainId,
-        bundleSimulation: bundleSimulation,
-      });
-    } catch (bundleSimError) {
-      logger.warn({
-        at: "TxUtil#submitBundle",
-        message: "MEV-Share bundle simulation failed (this is optional)",
-        error: bundleSimError instanceof Error ? bundleSimError.message : String(bundleSimError),
-        transaction: txHash,
-        chainId: chainId,
-        currentBlockNumber: currentBlockNumber,
-        maxBlockNumber: maxBlockNumber,
-      });
-    }
-  }
+  const bundleParams: BundleParams = await getBundleParams(
+    signedTx,
+    currentBlockNumber,
+    createHintPreferences(false, false, true, true, false),
+  );
 
   try {
+    logger.info({
+      at: "TxUtil#submitBundle",
+      message: "Submitting bundle via MEV-Share",
+      chainId: chainId,
+      transaction: txHash,
+      currentBlockNumber: currentBlockNumber,
+      Inclusion: bundleParams.inclusion,
+      hints: bundleParams.privacy,
+      originalTransaction: {
+        to: transaction.to,
+        value: transaction.value,
+        gasLimit: transaction.gasLimit,
+        gasPrice: transaction.gasPrice,
+        maxFeePerGas: transaction.maxFeePerGas,
+        maxPriorityFeePerGas: transaction.maxPriorityFeePerGas,
+        nonce: transaction.nonce,
+        data: transaction.data,
+        type: transaction.type,
+      },
+    });
+
     const response = await mevShareClient.sendBundle(bundleParams);
     logger.info({
       at: "TxUtil#submitBundle",
@@ -739,7 +711,8 @@ async function submitBundle(
       response: response,
       transaction: txHash,
       currentBlockNumber: currentBlockNumber,
-      maxBlockNumber: maxBlockNumber,
+      maxBlockNumber: bundleParams.inclusion.maxBlock,
+      bundleParams: bundleParams,
     });
   } catch (bundleSendError) {
     logger.error({
@@ -772,6 +745,58 @@ async function submitBundle(
     // Add a flag to indicate this is a MEV-Share bundle for special handling
     _mevShareTransaction: true,
     // Pass along the target block number used in the MEV-Share transaction
-    _mevShareTargetBlock: maxBlockNumber,
+    _mevShareTargetBlock: bundleParams.inclusion.maxBlock,
   } as TransactionResponse & { _mevShareTransaction?: boolean; _mevShareTargetBlock?: number };
+}
+
+// simulateSubmitBundle replaces the old simulateBundle helper
+async function simulateBundle(
+  logger: winston.Logger,
+  chainId: number,
+  transaction: ethers.providers.TransactionRequest,
+  signer: ethers.Signer,
+  provider: ethers.providers.Provider,
+): Promise<any> {
+  const mevShareClient = await getMevShareClient(provider, chainId);
+
+  // Sign the original transaction
+  const signedTx = await signer.signTransaction(transaction);
+  const txHash = ethers.utils.parseTransaction(signedTx).hash;
+
+
+  const currentBlockNumber = await provider.getBlockNumber();
+  const bundleParams: BundleParams = await getBundleParams(
+    signedTx,
+    currentBlockNumber,
+    createHintPreferences(false, false, true, true, false),
+  );
+
+  logger.info({
+    at: "TxUtil#simulateSubmitBundle",
+    message: "Simulating MEV-Share bundle",
+    chainId: chainId,
+    txHash: txHash,
+    Inclusion: bundleParams.inclusion,
+    hints: bundleParams.privacy
+  });
+
+  const startTime = Date.now();
+
+  const bundleSimulation = await mevShareClient.simulateBundle(bundleParams);
+
+
+  logger.info({
+    at: "TxUtil#simulateSubmitBundle",
+    message: "Bundle simulation successful",
+    txHash: txHash,
+    chainId: chainId,
+    transaction: txHash,
+    currentBlockNumber: currentBlockNumber,
+    Inclusion: bundleParams.inclusion,
+    hints: bundleParams.privacy,
+    bundleSimulation: bundleSimulation,
+    timeElapsed: Date.now() - startTime,
+  });
+
+  return bundleSimulation;
 }

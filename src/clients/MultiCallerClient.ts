@@ -208,6 +208,7 @@ export class MultiCallerClient {
     const batchTxns: AugmentedTransaction[] = nonMulticallTxns.concat(
       await this.buildMultiCallBundles(txns, this.chunkSize[chainId])
     );
+    const startTime = Date.now();
     const batchSimResults = await this.txnClient.simulate(batchTxns);
     const batchesAllSucceeded = batchSimResults.every(({ succeed, transaction, reason }, idx) => {
       // If txn succeeded or the revert reason is known to be benign, then log at debug level.
@@ -217,6 +218,7 @@ export class MultiCallerClient {
         at: "MultiCallerClient#executeChainTxnQueue",
         message: `${succeed ? "Successfully simulated" : "Failed to simulate"} ${networkName} transaction batch!`,
         batchTxn: { ...transaction, contract: transaction.contract.address },
+        timeTaken: Date.now() - startTime,
         reason,
       });
       batchTxns[idx].gasLimit = succeed ? transaction.gasLimit : undefined;
