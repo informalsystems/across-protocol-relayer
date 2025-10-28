@@ -304,7 +304,7 @@ async function deposit(args: Record<string, number | string>, signer: Signer): P
   console.log(`Submitting ${tokenSymbol} deposit on ${network}: ${transactionHash}.`);
   const receipt = await deposit.wait();
 
-  console.log("receipt", receipt);
+  console.log(`Successfully submitted deposit on ${network}: ${transactionHash}.`, receipt);
 
   // receipt.logs
   //   .filter((log) => log.address === spokePool.address)
@@ -606,6 +606,7 @@ async function run(argv: string[]): Promise<number> {
   switch (cmd) {
     case "deposit":
       result = await deposit(args, signer);
+      console.log("Deposit result:", result);
       break;
     case "dump":
       result = await dumpConfig(args, signer);
@@ -626,6 +627,7 @@ async function run(argv: string[]): Promise<number> {
 if (require.main === module) {
   run(process.argv.slice(2))
     .then(async (result) => {
+      console.log("Process exited with", result);
       process.exitCode = result;
     })
     .catch(async (error) => {

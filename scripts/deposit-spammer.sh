@@ -53,7 +53,9 @@ while true; do
     --token 0x4200000000000000000000000000000000000006 \
     --amount 0.001 \
     --recipient 0x7d9cf0e3b43a6b0b21efbef9ce729408c550d7e3 \
-    --exclusiveRelayer 0xca73a9a0e16639aa21775de6c81dbe79e6cbc0a3 &
+    --exclusiveRelayer 0xca73a9a0e16639aa21775de6c81dbe79e6cbc0a3 >> "$LOG_FILE" 2>&1 &
+  DEPOSIT_PID=$!
+  echo "[\"$(date -Is)\"] Spawned deposit PID=${DEPOSIT_PID}" >> "$LOG_FILE"
 
   END_TS=$(date +%s)
   ELAPSED=$(( END_TS - START_TS ))
