@@ -4,7 +4,7 @@ import dotenv from "dotenv";
 import { AugmentedTransaction } from "../clients";
 import { DEFAULT_GAS_FEE_SCALERS } from "../common";
 import { EthersError } from "../interfaces";
-import { createHintPreferences, createTransactionOptions, getBuilders, getMevShareClient, isMevShareSupportedChain, Wallet, getBundleParams } from "./MevShareUtils";
+import { createHintPreferences, createTransactionOptions, getBuilders, getMevShareClient, isMevShareSupportedChain, Wallet, getBundleParams, shouldSimulateMevShare } from "./MevShareUtils";
 import {
   BigNumber,
   bnZero,
@@ -39,6 +39,7 @@ const DEFAULT_LEGACY_CHAINS = [CHAIN_IDs.BSC];
 const ENV_LEGACY_CHAINS = process.env.LEGACY_TRANSACTION_CHAINS;
 const ENV_LEGACY_CHAINS_PARSED: number[] = ENV_LEGACY_CHAINS ? JSON.parse(ENV_LEGACY_CHAINS) : [];
 export const LEGACY_TRANSACTION_CHAINS = [...DEFAULT_LEGACY_CHAINS, ...ENV_LEGACY_CHAINS_PARSED];
+const BUNDLE_SIMULATION_ATTEMPTS = 3; // takes ~ 600ms per attempt
 
 export type TransactionSimulationResult = {
   transaction: AugmentedTransaction;
@@ -120,15 +121,34 @@ export async function runTransaction(
 
   const sendRawTransaction = method === "";
 
-  if (process.env.MEV_SHARE_SIMULATE !== "false") {
+  if (shouldSimulateMevShare(chainId)) {
     // If private transaction is enabled and the chain is supported, submit the transaction via MEV-Share
     const rawTx = await contract.populateTransaction[method](...(args as Array<unknown>),
-      { nonce: nonce, type: 0, gasPrice: 2000000, gasLimit: 200000 }); // Default gas limit and gas price if not specified
-    const bundleSimulation = await simulateBundle(logger, chainId, rawTx, contract.signer, provider);
-    // Update the gas limit with the bundle simulation gas limit as it has proven better accuracy
-    gasLimit = BigNumber.from(bundleSimulation.gasUsed);
-  }
+      {
+        nonce: nonce,
+        type: 0,
+        gasPrice: 10000000000, // 10 gwei for simulation 
+        gasLimit: gasLimit || 200000,
+      });
 
+    // Try to simulate multiple time if s
+    for (let i = 0; i < BUNDLE_SIMULATION_ATTEMPTS; i++) {
+      try {
+        const bundleSimulation = await simulateBundle(logger, chainId, rawTx, contract.signer, provider);
+        // Update the gas limit with the bundle simulation gas limit as it has proven better accuracy
+        gasLimit = BigNumber.from(bundleSimulation.gasUsed);
+        break;
+      } catch (error) {
+        logger.error({
+          at: "TxUtil#runTransaction",
+          message: i === BUNDLE_SIMULATION_ATTEMPTS - 1 ? "Last attempt to simulate bundle failed" : "Error simulating bundle, retrying...",
+          error: stringifyThrownValue(error),
+        });
+        // Exponentially increase gas price
+        rawTx.gasPrice = rawTx.gasPrice.pow(BigNumber.from(2));
+      }
+    }
+  }
 
   try {
     // Scalers must be set to 1 
@@ -777,7 +797,8 @@ async function simulateBundle(
     chainId: chainId,
     txHash: txHash,
     Inclusion: bundleParams.inclusion,
-    hints: bundleParams.privacy
+    gasLimit: transaction.gasLimit,
+    gasPrice: transaction.gasPrice,
   });
 
   const startTime = Date.now();
@@ -795,6 +816,8 @@ async function simulateBundle(
     Inclusion: bundleParams.inclusion,
     hints: bundleParams.privacy,
     bundleSimulation: bundleSimulation,
+    gasLimit: transaction.gasLimit,
+    gasPrice: transaction.gasPrice,
     timeElapsed: Date.now() - startTime,
   });
 

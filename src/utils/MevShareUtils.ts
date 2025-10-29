@@ -211,3 +211,12 @@ export function getBuilders(): string[] {
 }
 
 export { Wallet };
+
+
+export function shouldSimulateMevShare(chainId: number): boolean {
+    return (
+        (process.env.PRIVATE_TX_ENABLED === "true" || process.env.MEV_SHARE_BUNDLE_ENABLED === "true") &&
+        isMevShareSupportedChain(chainId)
+        && process.env.MEV_SHARE_SIMULATE !== "false"
+    );
+}

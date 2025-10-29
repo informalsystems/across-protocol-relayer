@@ -170,13 +170,17 @@ async function getRelayerQuote(
     // const quoteData = await getSuggestedFees(params, timeout);
     // use hardcoded quote data for now as suggested-fees endpoint isn't enabled in testnet
 
+    // Use on-chain time from the origin chain to avoid skew between local clock and chain time
+    const originProvider = await getProvider(params.originChainId);
+    const latestBlock = await originProvider.getBlock("latest");
+    const timestamp = Number(latestBlock.timestamp - 1200);
 
     const quoteData = {
       totalRelayFee: { total: "2547920323677" },
       exclusiveRelayer: "0x0000000000000000000000000000000000000000000000000000000000000000",
-      exclusivityDeadline: String(Math.floor(Date.now() / 1000) + 300),
-      timestamp: String(Math.floor(Date.now() / 1000)),
-      fillDeadline: String(Math.floor(Date.now() / 1000) + 300),
+      exclusivityDeadline: 0,
+      timestamp: timestamp,
+      fillDeadline: Number(timestamp + 11700),
       estimatedFillTimeSec: 9,
     };
 
@@ -239,6 +243,7 @@ async function deposit(args: Record<string, number | string>, signer: Signer): P
   const [recipient, message] = [args.recipient ?? depositor, args.message ?? sdkConsts.EMPTY_MESSAGE].map(String);
   const exclusiveRelayer = args.exclusiveRelayer ? String(args.exclusiveRelayer) : undefined;
   const exclusivityDeadline = args.exclusivityDeadline ? Number(args.exclusivityDeadline) : undefined;
+  const gasLimitOverride = args.gasLimit !== undefined ? String(args.gasLimit) : undefined;
 
   if (!utils.validateChainIds([fromChainId, toChainId])) {
     console.log(`Invalid set of chain IDs (${fromChainId}, ${toChainId}).`);
@@ -286,11 +291,26 @@ async function deposit(args: Record<string, number | string>, signer: Signer): P
       ? exclusivityDeadline
       : depositQuote.exclusivityDeadline;
 
-  const deposit = await spokePool.deposit(
+  // Resolve output token on the destination chain based on the input token symbol
+  const destinationTokenInfo = utils.resolveToken(token.symbol, toChainId);
+  const outputTokenAddress = destinationTokenInfo.address;
+
+  // Optional tx overrides (e.g., gasLimit) to bypass estimateGas when necessary
+  const txOverrides: ethers.providers.TransactionRequest = {};
+  if (gasLimitOverride) {
+    try {
+      txOverrides.gasLimit = BigNumber.from(gasLimitOverride);
+    } catch {
+      console.log(`Invalid --gasLimit value: ${gasLimitOverride}`);
+      return false;
+    }
+  }
+
+  console.log("submit desposit",
     toBytes32(depositor),
     recipientAddress.toBytes32(),
     toBytes32(token.address),
-    toBytes32("0xfff9976782d46cc05630d1f6ebab18b2324d6b14"), // outputToken
+    toBytes32(outputTokenAddress),
     amount,
     depositQuote.outputAmount,
     toChainId,
@@ -298,7 +318,51 @@ async function deposit(args: Record<string, number | string>, signer: Signer): P
     depositQuote.quoteTimestamp,
     depositQuote.fillDeadline,
     finalExclusivityDeadline,
-    message
+    message,
+    txOverrides
+  )
+
+  // Preflight: callStatic to surface revert reasons before sending
+  try {
+    await spokePool.callStatic.deposit(
+      toBytes32(depositor),
+      recipientAddress.toBytes32(),
+      toBytes32(token.address),
+      toBytes32(outputTokenAddress),
+      amount,
+      depositQuote.outputAmount,
+      toChainId,
+      finalExclusiveRelayer.toBytes32(),
+      depositQuote.quoteTimestamp,
+      depositQuote.fillDeadline,
+      finalExclusivityDeadline,
+      message,
+      // txOverrides
+    );
+  } catch (err: any) {
+    // Try to print structured revert info if available
+    const reason = (err?.errorName || err?.reason || err?.message || "Unknown revert");
+    console.error("Deposit simulation reverted:", reason);
+    if (err?.error?.message) {
+      console.error("Node error:", err.error.message);
+    }
+    return false;
+  }
+
+  const deposit = await spokePool.deposit(
+    toBytes32(depositor),
+    recipientAddress.toBytes32(),
+    toBytes32(token.address),
+    toBytes32(outputTokenAddress),
+    amount,
+    depositQuote.outputAmount,
+    toChainId,
+    finalExclusiveRelayer.toBytes32(),
+    depositQuote.quoteTimestamp,
+    depositQuote.fillDeadline,
+    finalExclusivityDeadline,
+    message,
+    txOverrides
   );
   const { hash: transactionHash } = deposit;
   console.log(`Submitting ${tokenSymbol} deposit on ${network}: ${transactionHash}.`);
@@ -543,7 +607,7 @@ function usage(badInput?: string): boolean {
   const depositArgs =
     "--from <originChainId> --to <destinationChainId>" +
     " --token <tokenSymbol> --amount <amount>" +
-    " [--recipient <recipient>] [--decimals]" +
+    " [--recipient <recipient>] [--decimals] [--gasLimit <gasLimit>]" +
     " [--relayer <exclusiveRelayer> --exclusivityDeadline <exclusivityDeadline>]";
 
   const dumpConfigArgs = "--chainId";
@@ -574,6 +638,7 @@ async function run(argv: string[]): Promise<number> {
     "message",
     "exclusiveRelayer",
     "exclusivityDeadline",
+    "gasLimit",
   ];
   const fetchOpts = ["chainId", "transactionHash", "depositId"];
   const fillOpts = ["txnHash", "chainId", "depositId"];
