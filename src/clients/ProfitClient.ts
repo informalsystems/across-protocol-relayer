@@ -250,9 +250,9 @@ export class ProfitClient {
           cause = isError(_cause)
             ? _cause.message
             : // For non-Error objects (including those containing BigInts), use util.inspect for a
-              // readable representation that won’t throw on JSON.stringify. This prints BigInts as
-              // “123n” and provides depth-limited details rather than the unhelpful "[object Object]".
-              inspect(_cause, { depth: 3, breakLength: 120 });
+            // readable representation that won’t throw on JSON.stringify. This prints BigInts as
+            // “123n” and provides depth-limited details rather than the unhelpful "[object Object]".
+            inspect(_cause, { depth: 3, breakLength: 120 });
         }
       }
       this.logger.warn({
@@ -423,7 +423,6 @@ export class ProfitClient {
       ? netRelayerFeeUsd.mul(fixedPoint).div(outputAmountUsd)
       : bnZero;
 
-    // If either token prices are unknown, assume the relay is unprofitable.
     const profitable =
       inputTokenPriceUsd.gt(bnZero) && outputTokenPriceUsd.gt(bnZero) && netRelayerFeePct.gte(minRelayerFeePct);
 
@@ -531,20 +530,28 @@ export class ProfitClient {
   > {
     let profitable = false;
     let netRelayerFeePct = bnZero;
+    let netRelayerFeeUsd: BigNumber | undefined;
     let nativeGasCost = uint256Max;
     let tokenGasCost = uint256Max;
     let gasPrice = uint256Max;
-    let maxGasUsd: BigNumber | undefined;
+    let maxGasUsd = bnZero;
     let gasTokenPriceUsd: BigNumber | undefined;
-
+    let gasCostUsd: BigNumber | undefined;
     try {
       const fillProfit = await this.getFillProfitability(deposit, lpFeePct, l1Token, repaymentChainId);
-      ({ profitable, netRelayerFeePct, nativeGasCost, tokenGasCost, gasPrice } = fillProfit);
+      ({ profitable, netRelayerFeePct, netRelayerFeeUsd, nativeGasCost, tokenGasCost, gasPrice, gasCostUsd, gasTokenPriceUsd } = fillProfit);
+
 
       // Get the maximum USD amount available for gas
       if (profitable) {
-        maxGasUsd = fillProfit.maxGasUsd;
-        gasTokenPriceUsd = fillProfit.gasTokenPriceUsd;
+
+
+        const isExclusiveRelayer = this.relayerAddressEvm.evmAddress === deposit.exclusiveRelayer.evmAddress;
+        // If the relayer is not the exclusive relayer, then set max gas USD. 
+        // It will be used to enhance the gas price in the transaction submission (runTransaction ./src/utils/TransactionUtils.ts)
+        if (!isExclusiveRelayer) {
+          maxGasUsd = fillProfit.maxGasUsd
+        }
 
         this.logger.debug({
           at: "ProfitClient#isFillProfitable",
@@ -553,9 +560,18 @@ export class ProfitClient {
           inputAmountUsd: formatEther(fillProfit.inputAmountUsd),
           outputAmountUsd: formatEther(fillProfit.outputAmountUsd),
           grossRelayerFeeUsd: formatEther(fillProfit.grossRelayerFeeUsd),
+          gasPrice: formatGwei(gasPrice.toString() ?? "0"),
+          lpFeePct: `${formatFeePct(lpFeePct)}%`,
+          lpFeeUsd: formatEther(fillProfit.grossRelayerFeeUsd.add(gasCostUsd)),
+          gasCostUsd: formatEther(gasCostUsd ?? "0"),
+          netRelayerFeeUsd: formatEther(netRelayerFeeUsd ?? bnZero),
+          netRelayerFeePct: `${formatFeePct(netRelayerFeePct)}%`,
           minRelayerFeeUsd: formatEther(fillProfit.grossRelayerFeeUsd.sub(fillProfit.maxGasUsd)),
           minRelayerFeePct: `${formatFeePct(fillProfit.minRelayerFeePct)}%`,
-          maxGasUsd: formatEther(maxGasUsd),
+          relayerAddressEvm: this.relayerAddressEvm.evmAddress,
+          exclusiveRelayer: deposit.exclusiveRelayer.evmAddress,
+          isExclusiveRelayer: isExclusiveRelayer,
+          maxGasUsd: formatEther(fillProfit.maxGasUsd),
           gasTokenPriceUsd: formatEther(gasTokenPriceUsd),
         });
       }

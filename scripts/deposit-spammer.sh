@@ -47,7 +47,7 @@ while true; do
   echo "[\"$(date -I)\"] Executing deposit..." >> "$LOG_FILE"
 
   # Run the deposit command
-  yarn deposit \
+  ACROSS_API_HOST=testnet.across.to yarn deposit \
     --from 84532 \
     --to 11155111 \
     --token 0x4200000000000000000000000000000000000006 \
