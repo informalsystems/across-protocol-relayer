@@ -10,12 +10,14 @@ MEV-Share allows transactions to be submitted with partial privacy, where certai
 
 ### Core Configuration
 
-- `MEV_SHARE_ENABLED`: Set to `"true"` to enable MEV-Share for supported chains
+- `PRIVATE_TX_ENABLED`: Set to `"true"` to submit private transaction using eth_submitPrivateTransaction RPC endpoint.
+- `MEV_SHARE_BUNDLE_ENABLED`: Set to `"true"` to submit transaction in a bundle to mev_sendBundle RPC endpoint.
 - `FLASHBOTS_AUTH_PRIVATE_KEY`: **REQUIRED** - Private key for MEV-Share authentication
 - `MEV_SHARE_SIMULATE`: Enable transaction simulation before sending (default: `true`)
-- `MEV_SHARE_MAX_BLOCK_NUMBER`: Maximum block number for transaction inclusion (optional)
+- `FLASHBOTS_MAX_BLOCKS_INCLUSION`: Maximum block number for transaction inclusion (optional)
+- `MEV_SHARE_CONFIRMATION_TIMEOUT`: Maximum timeout to wait for a transaction inclusion submitted using Flashbots
 
-### Privacy Hints Configuration
+### (TODO) Privacy Hints Configuration
 
 Control which transaction details are shared with MEV searchers:
 
@@ -32,38 +34,6 @@ MEV-Share is currently supported on:
 - **Ethereum Mainnet** (Chain ID: 1)
 - **Goerli Testnet** (Chain ID: 5)
 - **Sepolia Testnet** (Chain ID: 11155111)
-
-## Privacy Levels
-
-### High Privacy (Recommended for sensitive transactions)
-
-```bash
-MEV_SHARE_HINTS_LOGS=false
-MEV_SHARE_HINTS_CALLDATA=false
-MEV_SHARE_HINTS_FUNCTION_SELECTOR=false
-MEV_SHARE_HINTS_CONTRACT_ADDRESS=false
-MEV_SHARE_HINTS_TX_HASH=false
-```
-
-### Medium Privacy (Balanced approach)
-
-```bash
-MEV_SHARE_HINTS_LOGS=true
-MEV_SHARE_HINTS_CALLDATA=false
-MEV_SHARE_HINTS_FUNCTION_SELECTOR=true
-MEV_SHARE_HINTS_CONTRACT_ADDRESS=true
-MEV_SHARE_HINTS_TX_HASH=false
-```
-
-### Low Privacy (Maximum sharing for better inclusion)
-
-```bash
-MEV_SHARE_HINTS_LOGS=true
-MEV_SHARE_HINTS_CALLDATA=true
-MEV_SHARE_HINTS_FUNCTION_SELECTOR=true
-MEV_SHARE_HINTS_CONTRACT_ADDRESS=true
-MEV_SHARE_HINTS_TX_HASH=true
-```
 
 ## Authentication Setup
 
@@ -113,84 +83,3 @@ MEV_SHARE_HINTS_FUNCTION_SELECTOR=true
 MEV_SHARE_HINTS_CONTRACT_ADDRESS=true
 MEV_SHARE_HINTS_TX_HASH=false
 ```
-
-## How It Works
-
-1. **Transaction Preparation**: The relayer prepares the transaction as usual
-2. **Transaction Simulation** (if enabled): The transaction is simulated using both standard provider simulation and MEV-Share bundle simulation
-3. **Privacy Hints**: Based on configuration, certain transaction details are marked for sharing
-4. **MEV-Share Submission**: The transaction is submitted to the MEV-Share relay with privacy hints
-5. **MEV Searcher Visibility**: Searchers can see the shared hints but not the full transaction details
-6. **Bundle Creation**: Searchers can create bundles that include your transaction
-7. **Inclusion**: The transaction is included in a block, potentially with MEV kickbacks
-
-## Transaction Simulation
-
-MEV-Share transactions are automatically simulated before sending to ensure they will succeed:
-
-### Standard Simulation
-
-- Uses the provider's `call` method to simulate the transaction
-- Checks if the transaction would succeed without actually executing it
-- Provides the return data from the simulation
-
-### MEV-Share Bundle Simulation
-
-- Uses MEV-Share's own `simulateBundle` method
-- Provides additional information about gas usage, fees, and MEV potential
-- Shows coinbase differences and refundable values
-
-### Simulation Control
-
-- Set `MEV_SHARE_SIMULATE=false` to disable simulation
-- Simulation failures are logged but don't prevent transaction submission
-- Both simulation methods are attempted for maximum coverage
-
-## Benefits
-
-- **Better Inclusion**: MEV searchers can see transaction hints and create profitable bundles
-- **MEV Protection**: Partial privacy reduces the risk of frontrunning
-- **Flexible Privacy**: Configure exactly what information to share
-- **MEV Kickbacks**: Potential rewards from successful bundles
-
-## Considerations
-
-- **Privacy Trade-offs**: More hints shared = better inclusion but less privacy
-- **MEV Risk**: Even with hints, there's still some MEV risk
-- **Network Support**: Only works on supported networks
-- **Gas Costs**: May have different gas dynamics than standard transactions
-
-## Monitoring
-
-The relayer will log MEV-Share transactions with:
-
-- Privacy level details
-- Hint configuration
-- Transaction hash
-- Submission status
-
-Look for logs with `at: "TxUtil#MEV-Share"` to monitor MEV-Share activity.
-
-## Troubleshooting
-
-### Common Issues
-
-1. **Unsupported Network**: Ensure you're using a supported chain ID
-2. **Configuration Errors**: Check that all environment variables are properly set
-3. **Transaction Failures**: MEV-Share transactions may fail if not competitive enough
-
-### Debug Mode
-
-Enable debug logging to see detailed MEV-Share information:
-
-```bash
-LOG_LEVEL=debug
-```
-
-## Integration with Flashbots
-
-MEV-Share and Flashbots can be used together:
-
-- MEV-Share for partial privacy
-- Flashbots for private transactions
-- The relayer will choose MEV-Share if enabled and supported, otherwise fall back to Flashbots or standard mempool

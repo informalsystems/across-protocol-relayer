@@ -530,7 +530,7 @@ async function submitPrivateTransaction(
 ): Promise<TransactionResponse> {
 
   const currentBlockNumber = await provider.getBlockNumber();
-  const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
+  const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_INCLUSION);
 
   const mevShareClient = await getMevShareClient(provider, chainId);
   const signedTx = await signer.signTransaction(transaction);

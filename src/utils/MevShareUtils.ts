@@ -131,7 +131,7 @@ export async function getBundleParams(
     hints?: HintPreferences,
 ): Promise<BundleParams> {
     const targetBlock = currentBlockNumber + 1;
-    const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_IN_FUTURE);
+    const maxBlockNumber = currentBlockNumber + Number(process.env.FLASHBOTS_MAX_BLOCKS_INCLUSION);
 
     const bundle = [
         { tx: signedTx, canRevert: false },
