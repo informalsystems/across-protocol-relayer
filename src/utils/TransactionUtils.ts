@@ -383,7 +383,7 @@ export async function getGasPrice(
     baseFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas.sub(feeData.maxPriorityFeePerGas), "gwei"),
     maxPriorityFeePerGas: ethers.utils.formatUnits(feeData.maxPriorityFeePerGas, "gwei"),
     maxFeePerGas: ethers.utils.formatUnits(feeData.maxFeePerGas, "gwei"),
-    gasLimit: ethers.utils.formatUnits(gasLimit, "wei"),
+    gasLimit: gasLimit ? ethers.utils.formatUnits(gasLimit, "wei") : undefined,
     maxFeeScaler: maxFeePerGasScaler,
     priorityScaler: priorityScaler,
   });

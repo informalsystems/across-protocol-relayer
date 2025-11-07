@@ -544,8 +544,6 @@ export class ProfitClient {
 
       // Get the maximum USD amount available for gas
       if (profitable) {
-
-
         const isExclusiveRelayer = this.relayerAddressEvm.evmAddress === deposit.exclusiveRelayer.evmAddress;
         // If the relayer is not the exclusive relayer, then set max gas USD. 
         // It will be used to enhance the gas price in the transaction submission (runTransaction ./src/utils/TransactionUtils.ts)
