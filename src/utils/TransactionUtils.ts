@@ -121,17 +121,18 @@ export async function runTransaction(
 
   const sendRawTransaction = method === "";
 
+
   if (shouldSimulateMevShare(chainId)) {
     // If private transaction is enabled and the chain is supported, submit the transaction via MEV-Share
     const rawTx = await contract.populateTransaction[method](...(args as Array<unknown>),
       {
         nonce: nonce,
         type: 0,
-        gasPrice: 10000000000, // 10 gwei for simulation 
+        gasPrice: 3000000000, // use 3 gwei for simulation 
         gasLimit: gasLimit || 200000,
       });
 
-    // Try to simulate multiple time if s
+    // Simulate bundle multiple time if it fails
     for (let i = 0; i < BUNDLE_SIMULATION_ATTEMPTS; i++) {
       try {
         const bundleSimulation = await simulateBundle(logger, chainId, rawTx, contract.signer, provider);
@@ -141,13 +142,38 @@ export async function runTransaction(
       } catch (error) {
         logger.error({
           at: "TxUtil#runTransaction",
+          time: Date.now(),
           message: i === BUNDLE_SIMULATION_ATTEMPTS - 1 ? "Last attempt to simulate bundle failed" : "Error simulating bundle, retrying...",
-          error: stringifyThrownValue(error),
+          error: "error: " + stringifyThrownValue(error),
         });
-        // Exponentially increase gas price
-        rawTx.gasPrice = rawTx.gasPrice.pow(BigNumber.from(2));
+        if (error instanceof Error && error.message.includes("max fee per gas less than block base fee")) {
+          logger.debug({
+            at: "TxUtil#runTransaction",
+            message: "Max fee per gas less than block base fee, increasing gas price",
+            gasPrice: rawTx.gasPrice,
+          });
+          // increase the gas price by 0.5 gwei
+          rawTx.gasPrice = rawTx.gasPrice.add(BigNumber.from(500000000));
+          continue;
+        };
+
+        if (error instanceof Error && (error.message.includes("nonce too low") || error.message.includes("nonce too high"))) {
+          logger.debug({
+            at: "TxUtil#runTransaction",
+            message: "Incorrect nonce, resetting nonce",
+            gasPrice: rawTx.gasPrice,
+          });
+          nonce = await provider.getTransactionCount(await contract.signer.getAddress()) + 1;
+          continue;
+        };
+
+        logger.error({
+          at: "TxUtil#runTransaction",
+          message: "unhandled error simulating bundle",
+        });
+        throw new Error(`unhandled error simulating bundle: ${stringifyThrownValue(error)}`);
       }
-    }
+    };
   }
 
   try {
@@ -182,9 +208,12 @@ export async function runTransaction(
     if (LEGACY_TRANSACTION_CHAINS.includes(chainId)) {
       // For legacy chains ensure only gasPrice is present
       gas = { gasPrice: gas.gasPrice || gas.maxFeePerGas };
-      // Legacy transaction gas price multiplier
-      const gasMultiplier = ethers.utils.parseUnits(process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER || "1", 1).div(ethers.utils.parseUnits("1", 1));
-      gas.gasPrice = gas.gasPrice?.mul(gasMultiplier);
+
+      // Legacy transaction gas price multiplier if maxGasUsd is set (non-exclusive-orders)
+      if (maxGasUsd && maxGasUsd.gt(bnZero)) {
+        const gasMultiplier = ethers.utils.parseUnits(process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER || "1", 1).div(ethers.utils.parseUnits("1", 1));
+        gas.gasPrice = gas.gasPrice?.mul(gasMultiplier);
+      }
       // Only used to send tx - enhanced gas price still use estimated gas limit from oracle  
       gasLimit = BigNumber.from(process.env.LEGACY_TRANSACTION_GAS_LIMIT || "200000");
     } else {
@@ -206,7 +235,7 @@ export async function runTransaction(
       value,
       nonce,
       gas,
-      gasMultiplier: process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER || "1",
+      gasMultiplier: maxGasUsd && maxGasUsd.gt(bnZero) ? process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER : "1",
       flooredPriorityFeePerGas,
       gasLimit,
       priorityFeeScaler,
@@ -266,7 +295,7 @@ export async function runTransaction(
         args,
         value,
         gasLimit,
-        null,
+        nonce, // nonce is not reset here as we are retrying the transaction
         retriesRemaining,
         depositId,
         maxGasUsd,

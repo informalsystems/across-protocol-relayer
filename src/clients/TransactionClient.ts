@@ -93,63 +93,120 @@ export class TransactionClient {
     chainId: number
   ): Promise<any> {
     const provider = await getProvider(chainId);
-    const timeoutMs = Number(process.env.MEV_SHARE_CONFIRMATION_TIMEOUT) || 5 * 60 * 1000; // Default 5 minutes
-    const startTime = Date.now();
 
+    const checkForTxInBlock = async (blockNumber: number) => {
+      const block = await provider.getBlockWithTransactions(blockNumber);
+      const tx = block.transactions.find((t) => t.hash === txHash);
+      return !!(tx)
+    }
 
+    // Scenario 1: Current block is past target block
     let currentBlock = await provider.getBlockNumber();
     if (currentBlock > targetBlock) {
       this.logger.warn({
         at: "TransactionClient#waitForTransactionInBlock",
-        message: "Current block is past target block, nothing to check",
-        transactionHash: txHash,
+        message: "Current block is past target block",
         currentBlock: currentBlock,
         targetBlock: targetBlock,
+        txHash: txHash,
       });
+      const included = await checkForTxInBlock(targetBlock);
+      if (included) {
+        return await provider.getTransactionReceipt(txHash);
+      }
       return null;
     }
 
+    this.logger.debug({
+      at: "TransactionClient#waitForTransactionInBlock",
+      message: "Checking for tx inclusion starting from current block",
+      currentBlock: currentBlock,
+      targetBlock: targetBlock,
+      txHash: txHash,
+    });
 
-    while ((Date.now() - startTime < timeoutMs) && (currentBlock <= targetBlock)) {
-      const block = await provider.getBlockWithTransactions(currentBlock);
-      this.logger.debug({
-        at: "TransactionClient#waitForTransactionInBlock",
-        message: "checking block for transaction inclusion",
-        block: block.number,
-        txHash: txHash,
-        targetBlock: targetBlock,
-      });
+    // Always check current block first
+    if (await checkForTxInBlock(currentBlock)) {
+      return await provider.getTransactionReceipt(txHash);
+    }
 
-      const tx = block.transactions.find((t) => t.hash === txHash);
-      if (tx) {
-        const receipt = await provider.getTransactionReceipt(txHash);
-        return receipt;
-      } else {
-        currentBlock = block.number;
+    const timeoutMs = Number(process.env.MEV_SHARE_CONFIRMATION_TIMEOUT) || 5 * 60 * 1000; // Default 5 minutes
+    const startTime = Date.now();
+
+    // Scenario 2: Current block is before or equal to target block
+    while ((Date.now() - startTime < timeoutMs) && (currentBlock < targetBlock)) {
+      // Determine the latest known block and scan only existing blocks
+      const latestKnown = await provider.getBlockNumber();
+      const endBlock = Math.min(latestKnown, targetBlock);
+
+      if (endBlock > currentBlock) {
+        for (let blockNumber = currentBlock + 1; blockNumber <= endBlock; blockNumber++) {
+          const included = await checkForTxInBlock(blockNumber);
+          if (included) {
+            this.logger.debug({
+              at: "TransactionClient#waitForTransactionInBlock",
+              message: "Transaction found in block",
+              currentBlock: currentBlock,
+              block: blockNumber,
+              targetBlock: targetBlock,
+              txHash: txHash,
+            });
+            return await provider.getTransactionReceipt(txHash);
+          }
+        }
+
         this.logger.debug({
           at: "TransactionClient#waitForTransactionInBlock",
-          message: "tx not found in block, waiting for new block",
-          block: block.number,
-          txHash: txHash,
+          message: "Transaction not found in scanned range; waiting for next block",
+          currentBlock: currentBlock,
+          lastScannedBlock: endBlock,
           targetBlock: targetBlock,
+          txHash: txHash,
         });
+
+        currentBlock = endBlock;
+        if (currentBlock >= targetBlock) {
+          break;
+        }
       }
 
+      // Wait for a future block or until a short timeout elapses, then re-check
+      const remainingMs = timeoutMs - (Date.now() - startTime);
+      if (remainingMs <= 0) {
+        break;
+      }
       await new Promise<void>((resolve) => {
-        provider.once("block", (blockNumber) => {
-          if ((blockNumber !== currentBlock) && (blockNumber !== currentBlock + 1)) {
-            this.logger.warn({
-              at: "TransactionClient#waitForTransactionInBlock",
-              message: "Block number advanced by more than 1",
-              previousBlock: currentBlock,
-              newBlock: blockNumber,
-              txHash: txHash,
-              targetBlock: targetBlock,
-            });
+        let settled = false;
+        let timer: ReturnType<typeof setTimeout>;
+        const cleanup = () => {
+          if (timer) {
+            clearTimeout(timer);
           }
-          currentBlock = blockNumber; // stay the same or advance to the actual new block
-          resolve();
-        });
+        };
+        const waitNext = () => {
+          provider.once("block", (bn: number) => {
+            if (settled) {
+              return;
+            }
+            // Only resolve when we see a strictly newer block
+            if (bn > currentBlock) {
+              settled = true;
+              cleanup();
+              resolve();
+            } else {
+              // Otherwise ignore (non-monotonic or duplicate) and wait again
+              waitNext();
+            }
+          });
+        };
+        timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            cleanup();
+            resolve();
+          }
+        }, Math.min(remainingMs, 15000));
+        waitNext();
       });
     }
 
@@ -157,6 +214,7 @@ export class TransactionClient {
       at: "TransactionClient#waitForTransactionInBlock",
       message: currentBlock >= targetBlock ? "Transaction not found in blocks" : "Timeout waiting for transaction inclusion",
       transactionHash: txHash,
+      currentBlock: currentBlock,
       targetBlock: targetBlock,
       timeoutMs: timeoutMs,
     });
