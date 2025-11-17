@@ -158,12 +158,15 @@ export async function runTransaction(
         };
 
         if (error instanceof Error && (error.message.includes("nonce too low") || error.message.includes("nonce too high"))) {
+          nonce = await provider.getTransactionCount(await contract.signer.getAddress());
           logger.debug({
             at: "TxUtil#runTransaction",
             message: "Incorrect nonce, resetting nonce",
             gasPrice: rawTx.gasPrice,
+            nonce: nonce,
           });
-          nonce = await provider.getTransactionCount(await contract.signer.getAddress()) + 1;
+          // update the nonce in the transaction
+          rawTx.nonce = nonce;
           continue;
         };
 
@@ -235,7 +238,7 @@ export async function runTransaction(
       value,
       nonce,
       gas,
-      gasMultiplier: maxGasUsd && maxGasUsd.gt(bnZero) ? process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER : "1",
+      legacyTransactionGasPriceMultiplier: maxGasUsd && maxGasUsd.gt(bnZero) ? process.env.LEGACY_TRANSACTION_GAS_PRICE_MULTIPLIER : "1",
       flooredPriorityFeePerGas,
       gasLimit,
       priorityFeeScaler,
@@ -825,6 +828,7 @@ async function simulateBundle(
     message: "Simulating MEV-Share bundle",
     chainId: chainId,
     txHash: txHash,
+    nonce: transaction.nonce,
     Inclusion: bundleParams.inclusion,
     gasLimit: transaction.gasLimit,
     gasPrice: transaction.gasPrice,
